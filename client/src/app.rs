@@ -49,7 +49,7 @@ impl BunkerApp {
             receiver: None,
             online: false,
             dice_sides: 6,
-            pack_json: include_str!("../../packs/demo.json").to_owned(),
+            pack_json: include_str!("../packs/demo.json").to_owned(),
             pack_file: "my-pack.json".into(),
         }
     }
