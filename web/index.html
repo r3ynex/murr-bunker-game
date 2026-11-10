@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#151821">
+  <meta name="description" content="Мобильный тестовый клиент игры Murr Bunker">
+  <title>Murr Bunker — мобильный тестер</title>
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="header">
+      <div class="brand">
+        <span class="brand-mark">M</span>
+        <div><strong>MURR / БУНКЕР</strong><small>Тестовый мобильный клиент • 0.1</small></div>
+      </div>
+      <span class="pill" id="connection">Не подключено</span>
+    </header>
+
+    <section class="panel" id="setup">
+      <h1>Сыграть с друзьями</h1>
+      <p class="muted">Работает прямо в браузере телефона. Комнаты — на Cloudflare, голос — в Discord.</p>
+      <label for="nickname">Твой ник</label>
+      <input id="nickname" type="text" maxlength="24" minlength="2" autocomplete="nickname" value="Игрок">
+      <button id="create" class="primary">Создать комнату</button>
+      <div class="divider-text">или войти в существующую</div>
+      <label for="joinCode">Код комнаты</label>
+      <div class="inline">
+        <input id="joinCode" type="text" inputmode="text" maxlength="8" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="8 символов">
+        <button id="join">Войти</button>
+      </div>
+      <details class="settings">
+        <summary>Настройки подключения</summary>
+        <label for="serverUrl">Адрес API (обычно менять не нужно)</label>
+        <input id="serverUrl" type="url" autocomplete="url" spellcheck="false">
+        <p class="muted tiny">Если открыть тестер на Cloudflare Worker, сервер уже подключён автоматически.</p>
+      </details>
+    </section>
+
+    <section id="room" hidden>
+      <div class="panel room-top">
+        <div class="inline space-between">
+          <div><small class="muted">Комната</small><h1 id="roomCode">—</h1></div>
+          <button id="copyCode">Копировать код</button>
+        </div>
+        <p id="roomMeta" class="muted"></p>
+        <div class="inline">
+          <button id="reconnect">Переподключиться</button>
+          <button id="leave">В другую комнату</button>
+        </div>
+      </div>
+      <div id="roomUI"></div>
+    </section>
+
+    <section class="panel info" aria-label="Статус">
+      <p id="status" role="status" aria-live="polite">Для онлайн-игры потребуется один раз развернуть Cloudflare Worker.</p>
+    </section>
+    <footer>Временный интерфейс для проверки сетевых механик · Не финальный дизайн</footer>
+  </main>
+</body>
+</html>
