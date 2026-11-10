@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "server/**"
+      - "web/**"
       - ".github/workflows/server-check.yml"
   workflow_dispatch:
 
@@ -24,3 +25,4 @@ jobs:
           node-version: "22"
       - run: npm install
       - run: npm run check
+      - run: node --check ../web/app.js
