@@ -39,3 +39,7 @@
 Мобильный временный интерфейс лежит в `web/`. Он запускается на **том же Cloudflare Worker**, что и сервер комнат. Чтобы разместить его без ПК, в GitHub добавь два Actions Secrets: `CLOUDFLARE_ACCOUNT_ID` и `CLOUDFLARE_API_TOKEN`, затем запусти **Actions → Deploy Cloudflare rooms and mobile tester → Run workflow**. После успешного развёртывания открой выданную ссылку `.workers.dev` в браузере телефона. Голос отдельно в Discord.
 
 **Каждую комнату подключать отдельно не надо:** Cloudflare создаёт её автоматически при нажатии «Создать комнату». Подробные инструкции — [в руководстве](DEVELOPER_GUIDE.md#11-как-протестировать-игру-с-androidiphone-без-пк). API-ключ не отправляй никому и никогда не добавляй в код.
+
+## Cloudflare для разработчиков и AI-агентов
+
+Официальные инструкции для Cloudflare Skills/MCP и настройка публикации из GitHub описаны в **[CLOUDFLARE_AGENT_SETUP.md](CLOUDFLARE_AGENT_SETUP.md)**. В **[AGENTS.md](AGENTS.md)** — правила работы AI-кодовых агентов с архитектурой этой игры. Подключение Cloudflare MCP само по себе не публикует сервер: для этого нужны GitHub Actions Secrets и ручной Deploy workflow.
