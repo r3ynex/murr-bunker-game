@@ -1,0 +1,50 @@
+name: Build portable Windows client
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "client/**"
+      - ".github/workflows/windows-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client
+
+      - name: Check
+        working-directory: client
+        run: cargo check
+
+      - name: Build optimized portable EXE
+        working-directory: client
+        run: cargo build --release
+
+      - name: Bundle standalone executable and demo pack
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item client/target/release/murr-bunker-game.exe dist/Murr-Bunker.exe
+          Copy-Item client/packs/demo.json dist/pack-example.json
+          Compress-Archive -Path dist/* -DestinationPath Murr-Bunker-Windows-x64.zip -Force
+
+      - name: Upload portable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Murr-Bunker-Windows-x64
+          path: Murr-Bunker-Windows-x64.zip
+          if-no-files-found: error

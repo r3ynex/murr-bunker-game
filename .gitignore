@@ -1,0 +1,16 @@
+# Rust build output
+client/target/
+**/*.rs.bk
+# Node dependencies and temporary Cloudflare files
+server/node_modules/
+server/.wrangler/
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+# Local auth tokens and private configuration
+murr-config.json
+my-pack.json
+.env
+.env.*
