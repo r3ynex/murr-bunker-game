@@ -156,6 +156,8 @@ export class Room extends DurableObject {
       } else if (data.type === "start") {
         if (state.stage !== "lobby") throw Error("Игра уже запущена");
         if (state.players.length < 2) throw Error("Нужно минимум два игрока (тестовый режим)");
+        // Rooms created before v2 may still contain an old-style stored pack.
+        if (!Array.isArray(state.pack.categoryOrder)) state.pack = normalizePack(state.pack);
         state.stage = "playing";
         state.round = 1;
         const scenario = drawScenario(state.pack);
