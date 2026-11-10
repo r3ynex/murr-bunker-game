@@ -113,10 +113,10 @@ export function importBunkerOnline(input) {
     health: "health", hobbies: "hobby", phobia: "fear", inventory: "equipment",
     backpack: "backpack", addInfo: "fact", spec: "ability"
   };
-  // In original exports "spec" is the root, while "spec.spec" is the ability category.
+  // Original exports store categories at root level; "spec" is the ability section.
   const categories = {};
   for (const [source, target] of Object.entries(map)) {
-    const entries = input.spec[source]?.data;
+    const entries = input[source]?.data;
     if (Array.isArray(entries) && entries.length) {
       categories[target] = { label: CATEGORY_LABELS[target], cards: entries.map(slimOriginal) };
     }
@@ -129,14 +129,14 @@ export function importBunkerOnline(input) {
   };
   const bunker = {};
   for (const [source, target] of Object.entries(bunkerMap)) {
-    const entries = input.spec[source]?.data;
+    const entries = input[source]?.data;
     if (Array.isArray(entries) && entries.length) bunker[target] = entries.map(slimOriginal);
   }
-  const catastrophes = input.spec.catastrophe?.data;
+  const catastrophes = input.catastrophe?.data;
   return {
     formatVersion: 2, id: "imported-bunker-online", name: "Импорт Бункер Онлайн",
     description: "Импортированный пользовательский пак. Проверьте содержимое перед публикацией.",
-    categories, catastrophe: undefined,
+    categories,
     catastrophes: Array.isArray(catastrophes) && catastrophes.length ?
       catastrophes.map(slimOriginal) : DEFAULT_INPUT.catastrophes,
     bunker: Object.keys(bunker).length ? bunker : { description: DEFAULT_INPUT.bunkers }
