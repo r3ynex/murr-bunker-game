@@ -210,7 +210,11 @@ export function organizePack(source) {
   };
   for (const [group, names] of Object.entries(PACK_GROUPS)) {
     for (const key of names) {
-      if (pack.categories[key]) grouped[group][key] = pack.categories[key];
+      if (pack.categories[key]) {
+        const cards = pack.categories[key];
+        const label = pack.categoryLabels[key];
+        grouped[group][key] = label !== CATEGORY_LABELS[key] ? { label, cards } : cards;
+      }
     }
   }
   const custom = Object.fromEntries(pack.categoryOrder.filter(key => !CATEGORIES.includes(key))
