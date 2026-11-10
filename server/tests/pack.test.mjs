@@ -83,7 +83,8 @@ test("flat v2 and grouped v2 share the same internal representation", () => {
     bunker: { location: ["На горе"] }
   };
   const organized = organizePack(flat);
-  assert.equal(organized.roles.profession[0].stage, "Мастер");
+  assert.equal(organized.roles.profession.cards[0].stage, "Мастер");
+  assert.equal(organized.roles.profession.label, "Профессии");
   assert.equal(organized.customCategories.talent.label, "Талант");
   assert.deepEqual(normalizePack(flat), normalizePack(organized));
   assert.deepEqual(normalizePack(organizePack(example)), normalizePack(example));
