@@ -152,10 +152,80 @@ function slimOriginal(entry) {
   if (entry.id !== undefined) result.id = String(entry.id);
   return result;
 }
+// Authoring-friendly v2 format: one JSON with sections instead of many files.
+const PACK_GROUPS = {
+  roles: ["profession", "ability"],
+  characteristics: ["gender", "body", "personality", "health", "hobby", "fear", "fact"],
+  items: ["equipment", "backpack"]
+};
+const GROUP_FIELDS = [...Object.keys(PACK_GROUPS), "customCategories", "meta", "world"];
+function groupedToFlat(input) {
+  if (input.categories !== undefined || input.catastrophes !== undefined ||
+      input.bunker !== undefined || input.bunkers !== undefined ||
+      input.name !== undefined || input.id !== undefined || input.description !== undefined) {
+    throw Error("Не смешивай секции v2 с устаревшими полями categories/catastrophes/name");
+  }
+  for (const key of Object.keys(input)) {
+    if (key !== "formatVersion" && !GROUP_FIELDS.includes(key)) {
+      throw Error("Неизвестный раздел пака: " + key);
+    }
+  }
+  const categories = {};
+  for (const [group, names] of Object.entries(PACK_GROUPS)) {
+    const values = input[group] ?? {};
+    if (!record(values)) throw Error(group + ": ожидается объект с категориями");
+    for (const [key, cards] of Object.entries(values)) {
+      if (!names.includes(key)) throw Error(group + ": неизвестная категория " + key);
+      categories[key] = cards;
+    }
+  }
+  const extra = input.customCategories ?? {};
+  if (!record(extra)) throw Error("customCategories: ожидается объект");
+  for (const [key, value] of Object.entries(extra)) {
+    if (key in categories || CATEGORIES.includes(key)) throw Error("Повтор категории: " + key);
+    categories[key] = value;
+  }
+  const meta = input.meta ?? {};
+  const world = input.world ?? {};
+  if (!record(meta) || !record(world)) throw Error("meta и world должны быть объектами");
+  for (const key of Object.keys(meta)) {
+    if (!["id", "name", "description"].includes(key)) throw Error("meta: неизвестное поле " + key);
+  }
+  for (const key of Object.keys(world)) {
+    if (!["catastrophes", "bunker"].includes(key)) throw Error("world: неизвестное поле " + key);
+  }
+  return {
+    formatVersion: 2, ...meta, categories,
+    catastrophes: world.catastrophes, bunker: world.bunker
+  };
+}
+// Used by the importer to export a ready-to-edit SINGLE document.
+export function organizePack(source) {
+  const pack = normalizePack(source);
+  const grouped = {
+    formatVersion: 2,
+    meta: { id: pack.id, name: pack.name, description: pack.description },
+    roles: {}, characteristics: {}, items: {},
+    world: { catastrophes: pack.catastrophes, bunker: pack.bunker }
+  };
+  for (const [group, names] of Object.entries(PACK_GROUPS)) {
+    for (const key of names) {
+      if (pack.categories[key]) grouped[group][key] = pack.categories[key];
+    }
+  }
+  const custom = Object.fromEntries(pack.categoryOrder.filter(key => !CATEGORIES.includes(key))
+    .map(key => [key, { label: pack.categoryLabels[key], cards: pack.categories[key] }]));
+  if (Object.keys(custom).length) grouped.customCategories = custom;
+  return grouped;
+}
+
 export function normalizePack(source) {
   if (!record(source)) throw Error("Неверный формат пака");
   if (JSON.stringify(source).length > 500000) throw Error("Пак слишком большой (500 КБ)");
-  const input = record(source.spec) ? importBunkerOnline(source) : source;
+  const converted = record(source.spec) ? importBunkerOnline(source) : source;
+  const grouped = converted.formatVersion === 2 &&
+    GROUP_FIELDS.some(key => Object.hasOwn(converted, key));
+  const input = grouped ? groupedToFlat(converted) : converted;
   if (input.formatVersion !== undefined && input.formatVersion !== 2) throw Error("Неизвестная версия пака");
   const v2 = input.formatVersion === 2;
   const inputCategories = input.categories ?? {};
