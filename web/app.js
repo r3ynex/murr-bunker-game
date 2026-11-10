@@ -182,14 +182,14 @@ function render() {
       mount.append(panel);
       const editor = element("section", null, "panel");
       const details = element("details");
-      const summary = element("summary", "Свой пак (JSON)");
+      const summary = element("summary", "Свой пак (JSON / импорт Бункер Онлайн)");
       details.append(summary);
-      addText(details, "Вставь JSON или загрузи файл. Пак применяется до запуска.", "p", "muted tiny");
+      addText(details, "Можно вставить готовый .json или экспорт Бункер Онлайн. Для редактирования по разделам используй папку packs/ и сборщик tools/pack.mjs.", "p", "muted tiny");
       const file = element("input");
       file.type = "file";
       file.accept = "application/json,.json";
       const area = element("textarea");
-      area.placeholder = '{"name":"Мой пак","categories":{"profession":["Инженер","Врач"]}}';
+      area.placeholder = '{"formatVersion":2,"name":"Мой пак","categories":{"profession":{"cards":[{"title":"Инженер","stage":"Опытный"}]}}}';
       area.setAttribute("aria-label", "JSON пака");
       file.addEventListener("change", async () => {
         try {
@@ -197,6 +197,14 @@ function render() {
         } catch (err) { setStatus(err.message, true); }
       });
       details.append(file, area);
+      addButton(details, "Загрузить пример v2", async () => {
+        try {
+          const response = await fetch("/packs/starter.json");
+          if (!response.ok) throw Error("Пример пока не опубликован");
+          area.value = await response.text();
+          setStatus("Загружен пример структурированного пака v2");
+        } catch (err) { setStatus(err.message, true); }
+      });
       addButton(details, "Применить пак к комнате", () => {
         try { send("set_pack", { pack: JSON.parse(area.value) }); }
         catch (err) { setStatus("JSON: " + err.message, true); }
@@ -219,8 +227,8 @@ function render() {
   }
   const scenario = element("section", null, "panel");
   addText(scenario, "Сценарий", "h2");
-  addText(scenario, "Катаклизм: " + room.catastrophe);
-  addText(scenario, "Бункер: " + room.bunker);
+  addText(scenario, "Катаклизм: " + room.catastrophe, "p", "multiline");
+  addText(scenario, "Бункер: " + room.bunker, "p", "multiline");
   const actions = element("div", null, "actions");
   if (isHost) {
     addButton(actions, "Следующий раунд", () => send("next_round"));
@@ -266,8 +274,8 @@ function render() {
     for (const card of player.cards) {
       const row = element("div", null, "card");
       const info = element("span");
-      addText(info, labels[card.kind] || card.kind, "small");
-      addText(info, card.value, "span");
+      addText(info, room.categoryLabels?.[card.kind] || labels[card.kind] || card.kind, "small");
+      addText(info, card.value, "span", "multiline");
       row.append(info);
       if (player.id === room.you && !card.revealed && player.active) {
         addButton(row, "Открыть", () => send("reveal", { kind: card.kind }));

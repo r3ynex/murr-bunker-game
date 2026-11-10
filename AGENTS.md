@@ -38,5 +38,5 @@ For Rust: `cd client && cargo check` and `cargo build --release`. For the browse
 
 - First priority: functional, testable rooms, privacy of hidden cards, reconnect flow and stable online interactions.
 - The user owns the final visual design; the current egui and browser UIs are placeholders.
-- Packs are user-authored JSON. Do not copy third-party paid content or branding assets.
+- Packs are user-authored **single JSON** (see `PACK_FORMAT.md`). Format v2 has sections `meta`, `roles`, `characteristics`, `items`, `world`, `customCategories` and is normalized in `server/src/content.js`. Keep legacy JSON and Bunker Online exports importable; no JS evaluation. Do not copy third-party paid content or branding assets.
 - Voice communication happens outside the game, through Discord.

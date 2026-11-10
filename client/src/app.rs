@@ -293,7 +293,10 @@ impl BunkerApp {
                         }
                         for card in &player.cards {
                             ui.horizontal_wrapped(|ui| {
-                                ui.label(format!("{}: {}", category_name(&card.kind), card.value));
+                                let label = room.category_labels.get(&card.kind)
+                                    .map(String::as_str)
+                                    .unwrap_or_else(|| category_name(&card.kind));
+                                ui.label(format!("{}: {}", label, card.value));
                                 if player.id == room.you && !card.revealed && player.active {
                                     if ui.button("Открыть").clicked() {
                                         self.send(json!({ "type": "reveal", "kind": card.kind }));
@@ -310,7 +313,8 @@ impl BunkerApp {
     }
 
     fn pack_editor(&mut self, ui: &mut egui::Ui, can_apply: bool) {
-        ui.label("Пак редактируется локально. Файл читается относительно папки с .exe.");
+        ui.label("Готовый JSON (v1/v2 или экспорт Бункер Онлайн).");
+        ui.label("Для раздельных файлов редактируй packs/ и собирай через node tools/pack.mjs build.");
         ui.horizontal(|ui| {
             ui.label("Файл:");
             ui.text_edit_singleline(&mut self.pack_file);

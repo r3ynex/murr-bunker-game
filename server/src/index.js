@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { DEFAULT_PACK, CATEGORIES, normalizePack } from "./content.js";
+import { DEFAULT_PACK, normalizePack, drawCard, drawScenario } from "./content.js";
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), {
   status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }
@@ -7,7 +7,6 @@ const json = (data, status = 200) => new Response(JSON.stringify(data), {
 const codeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const randomCode = () => Array.from(crypto.getRandomValues(new Uint8Array(8)), b => codeAlphabet[b % codeAlphabet.length]).join("");
 const randomToken = () => crypto.randomUUID() + crypto.randomUUID();
-const pick = list => list[crypto.getRandomValues(new Uint32Array(1))[0] % list.length];
 const nameFrom = body => {
   const name = body?.name;
   if (typeof name !== "string" || name.trim().length < 2 || name.trim().length > 24) throw Error("Ник: от 2 до 24 символов");
@@ -111,7 +110,8 @@ export class Room extends DurableObject {
     return {
       code: state.code, you: viewerId, hostId: state.hostId, stage: state.stage,
       round: state.round, seats: state.seats, catastrophe: state.catastrophe,
-      bunker: state.bunker, packName: state.pack.name, voteOpen: state.voteOpen,
+      bunker: state.bunker, packName: state.pack.name,
+      categoryLabels: state.pack.categoryLabels, voteOpen: state.voteOpen,
       ballotsCount: Object.keys(state.ballots).length, voteResults: state.voteResults,
       log: state.log, connected: this.ctx.getWebSockets().length,
       players: state.players.map(p => ({
@@ -130,7 +130,7 @@ export class Room extends DurableObject {
     }
   }
   async webSocketMessage(ws, message) {
-    if (typeof message !== "string" || message.length > 65536) {
+    if (typeof message !== "string" || message.length > 550000) {
       ws.send(JSON.stringify({ type: "error", message: "Слишком большое сообщение" }));
       return;
     }
@@ -156,13 +156,16 @@ export class Room extends DurableObject {
       } else if (data.type === "start") {
         if (state.stage !== "lobby") throw Error("Игра уже запущена");
         if (state.players.length < 2) throw Error("Нужно минимум два игрока (тестовый режим)");
+        // Rooms created before v2 may still contain an old-style stored pack.
+        if (!Array.isArray(state.pack.categoryOrder)) state.pack = normalizePack(state.pack);
         state.stage = "playing";
         state.round = 1;
-        state.catastrophe = pick(state.pack.catastrophes);
-        state.bunker = pick(state.pack.bunkers);
+        const scenario = drawScenario(state.pack);
+        state.catastrophe = scenario.catastrophe;
+        state.bunker = scenario.bunker;
         state.players.forEach(p => {
           p.active = true;
-          p.cards = CATEGORIES.map(kind => ({ kind, value: pick(state.pack.categories[kind]), revealed: false }));
+          p.cards = state.pack.categoryOrder.map(kind => drawCard(state.pack, kind));
         });
         this.note(state, "Игра началась");
       } else if (data.type === "reveal") {

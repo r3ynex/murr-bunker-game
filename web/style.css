@@ -32,6 +32,7 @@ summary{cursor:pointer}
 .card{display:flex;align-items:center;gap:8px;justify-content:space-between;background:#202633;border-radius:8px;padding:8px 9px;flex-wrap:wrap}
 .card span{flex:1;min-width:160px}
 .card small{color:var(--muted);display:block}
+.multiline{white-space:pre-line;overflow-wrap:anywhere}
 .actions{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
 .note{border-left:2px solid #8191b0;padding:5px 10px;margin:6px 0}
 #status{margin:0;overflow-wrap:anywhere}

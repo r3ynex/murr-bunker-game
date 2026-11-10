@@ -6,6 +6,16 @@ on:
     paths:
       - "server/**"
       - "web/**"
+      - "tools/**"
+      - "packs/**"
+      - ".github/workflows/server-check.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "server/**"
+      - "web/**"
+      - "tools/**"
+      - "packs/**"
       - ".github/workflows/server-check.yml"
   workflow_dispatch:
 
