@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,6 +21,8 @@ pub struct Room {
     pub catastrophe: String,
     pub bunker: String,
     pub pack_name: String,
+    #[serde(default)]
+    pub category_labels: HashMap<String, String>,
     pub vote_open: bool,
     pub ballots_count: usize,
     pub vote_results: Vec<VoteResult>,
