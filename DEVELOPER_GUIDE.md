@@ -1,3 +1,5 @@
+> **Новый формат паков v2:** один JSON с разделами `roles`, `characteristics`, `items`, `world` и `customCategories`. Актуальная документация — **[PACK_FORMAT.md](PACK_FORMAT.md)**. Старые примеры v1 продолжают работать.
+
 # Murr Bunker Game — путеводитель по исходникам
 
 **Цель:** бесплатная портативная игра для компании друзей в духе «Бункера», но со своими механиками и оформлением. Основной клиент — **Rust + egui**, комнаты — **Cloudflare Worker + Durable Objects**, сборка Windows — **GitHub Actions**.
