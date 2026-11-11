@@ -2,7 +2,7 @@ name: Build portable Windows client
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/pdf-ui-lobby-ready-20261111]
     paths:
       - "client/**"
       - ".github/workflows/windows-build.yml"
