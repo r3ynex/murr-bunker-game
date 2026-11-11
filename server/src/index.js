@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { DEFAULT_PACK, normalizePack, drawCard, drawScenario } from "./content.js";
+import { MAX_PLAYERS, avatarIdFrom, canStartGame } from "./lobby_rules.js";
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), {
   status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }
@@ -19,12 +20,14 @@ export default {
     if (url.pathname === "/api/health") return json({ ok: true, version: 1 });
     try {
       if (url.pathname === "/api/rooms" && request.method === "POST") {
-        const name = nameFrom(await request.json());
+        const body = await request.json();
+        const name = nameFrom(body);
+        const avatarId = avatarIdFrom(body.avatarId);
         for (let i = 0; i < 3; i++) {
           const code = randomCode();
           const room = env.ROOMS.getByName(code);
           const result = await room.fetch("https://room.internal/init", {
-            method: "POST", body: JSON.stringify({ code, name })
+            method: "POST", body: JSON.stringify({ code, name, avatarId })
           });
           if (result.status === 409) continue;
           return result;
@@ -36,9 +39,11 @@ export default {
       const [, code, action] = match;
       const room = env.ROOMS.getByName(code);
       if (action === "join" && request.method === "POST") {
-        const name = nameFrom(await request.json());
+        const body = await request.json();
+        const name = nameFrom(body);
+        const avatarId = avatarIdFrom(body.avatarId);
         return room.fetch("https://room.internal/join", {
-          method: "POST", body: JSON.stringify({ name })
+          method: "POST", body: JSON.stringify({ name, avatarId })
         });
       }
       if (action === "ws" && request.method === "GET") {
@@ -61,8 +66,8 @@ export class Room extends DurableObject {
     const state = await this.ctx.storage.get("room");
     if (url.pathname === "/init" && request.method === "POST") {
       if (state) return json({ error: "Room exists" }, 409);
-      const { code, name } = await request.json();
-      const player = this.newPlayer(name);
+      const { code, name, avatarId } = await request.json();
+      const player = this.newPlayer(name, avatarId);
       const room = {
         code, hostId: player.id, stage: "lobby", round: 0, seats: 1,
         catastrophe: "", bunker: "", pack: DEFAULT_PACK, players: [player],
@@ -74,9 +79,9 @@ export class Room extends DurableObject {
     if (!state) return json({ error: "Комната не существует" }, 404);
     if (url.pathname === "/join" && request.method === "POST") {
       if (state.stage !== "lobby") return json({ error: "Партия уже запущена" }, 409);
-      if (state.players.length >= 15) return json({ error: "Комната заполнена" }, 409);
-      const { name } = await request.json();
-      const player = this.newPlayer(name);
+      if (state.players.length >= MAX_PLAYERS) return json({ error: "Комната заполнена" }, 409);
+      const { name, avatarId } = await request.json();
+      const player = this.newPlayer(name, avatarId);
       state.players.push(player);
       state.seats = Math.max(1, Math.floor(state.players.length / 2));
       this.note(state, name + " присоединился");
@@ -99,8 +104,8 @@ export class Room extends DurableObject {
     return json({ error: "Not found" }, 404);
   }
 
-  newPlayer(name) {
-    return { id: crypto.randomUUID(), token: randomToken(), name, active: true, cards: [] };
+  newPlayer(name, avatarId = 0) {
+    return { id: crypto.randomUUID(), token: randomToken(), name, avatarId: avatarIdFrom(avatarId), ready: false, active: true, cards: [] };
   }
   note(state, message) {
     state.log.push(message);
@@ -115,7 +120,8 @@ export class Room extends DurableObject {
       ballotsCount: Object.keys(state.ballots).length, voteResults: state.voteResults,
       log: state.log, connected: this.ctx.getWebSockets().length,
       players: state.players.map(p => ({
-        id: p.id, name: p.name, active: p.active,
+        id: p.id, name: p.name, avatarId: p.avatarId ?? 0,
+        ready: p.ready === true, active: p.active,
         cards: p.cards.filter(c => p.id === viewerId || c.revealed)
           .map(c => ({ kind: c.kind, value: c.value, revealed: c.revealed }))
       }))
@@ -144,7 +150,13 @@ export class Room extends DurableObject {
       const host = me.id === state.hostId;
       const hostOnly = ["start", "start_vote", "finish_vote", "next_round", "set_active", "set_seats", "set_pack", "finish"];
       if (hostOnly.includes(data.type) && !host) throw Error("Только ведущий может выполнить действие");
-      if (data.type === "set_pack") {
+      if (data.type === "set_ready") {
+        if (state.stage !== "lobby") throw Error("Готовность меняется только в лобби");
+        if (me.id === state.hostId) throw Error("Владелец запускает игру отдельной кнопкой");
+        if (typeof data.ready !== "boolean") throw Error("Некорректное значение готовности");
+        me.ready = data.ready;
+        this.note(state, me.name + (me.ready ? " готов" : " не готов"));
+      } else if (data.type === "set_pack") {
         if (state.stage !== "lobby") throw Error("Менять пак можно только до старта");
         state.pack = normalizePack(data.pack);
         this.note(state, "Выбран пак: " + state.pack.name);
@@ -154,8 +166,8 @@ export class Room extends DurableObject {
         if (!Number.isInteger(seats) || seats < 1 || seats > 15) throw Error("Недопустимое число мест");
         state.seats = seats;
       } else if (data.type === "start") {
-        if (state.stage !== "lobby") throw Error("Игра уже запущена");
-        if (state.players.length < 2) throw Error("Нужно минимум два игрока (тестовый режим)");
+        const startError = canStartGame(state);
+        if (startError) throw Error(startError);
         // Rooms created before v2 may still contain an old-style stored pack.
         if (!Array.isArray(state.pack.categoryOrder)) state.pack = normalizePack(state.pack);
         state.stage = "playing";
