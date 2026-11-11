@@ -1,5 +1,6 @@
-use crate::model::{category_name, LocalConfig, Room, Session};
+use crate::model::{category_name, Card, LocalConfig, Room, Session};
 use crate::appearance::{portable_path, with_icon, Layout, Theme};
+use crate::artwork::{centered_row, flat_button, input_row, paint_cover, paint_gradient, table_cell, Artwork, Icon};
 use crate::network;
 use eframe::egui::{self, Color32, RichText, Stroke};
 use ewebsock::{WsEvent, WsMessage, WsReceiver, WsSender};
@@ -76,7 +77,8 @@ fn heading(ui: &mut egui::Ui, theme: &Theme, name: &str) {
 }
 fn section_rule(ui: &mut egui::Ui, theme: &Theme) {
     ui.add_space(theme.spacing.section_gap);
-    ui.separator();
+    let (line, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+    ui.painter().rect_filled(line, 0u8, theme.palette.outline.color());
     ui.add_space(theme.spacing.section_gap);
 }
 fn card_text(text: &str) -> String {
@@ -90,6 +92,7 @@ fn appearance_warnings(warnings: [Option<String>; 3]) -> String {
 
 pub struct BunkerApp {
     theme: Theme,
+    artwork: Artwork,
     layout: Layout,
     appearance_message: String,
     server_url: String,
@@ -115,6 +118,7 @@ pub struct BunkerApp {
     editor: Option<(String, String)>,
     editor_value: String,
     pending_section: Option<usize>,
+    active_section: usize,
     dice_sides: u32,
     event_chance: u32,
     pack_json: String,
@@ -144,6 +148,7 @@ impl BunkerApp {
         let profile_ready = !config.nickname.trim().is_empty();
         Self {
             theme,
+            artwork: Artwork::load(&cc.egui_ctx),
             layout,
             appearance_message,
             server_url: config.server_url,
@@ -156,7 +161,7 @@ impl BunkerApp {
             create_on_connect: false,
             show_avatar_picker: false, show_join: false, show_create: false,
             show_settings: false, show_host_tools: false, show_survivability: false,
-            editor: None, editor_value: String::new(), pending_section: None,
+            editor: None, editor_value: String::new(), pending_section: None, active_section: 0,
             dice_sides: 6, event_chance: 0,
             pack_json: include_str!("../packs/demo.json").to_owned(),
             pack_file: String::new(), pack_zip: None,
@@ -171,6 +176,8 @@ impl BunkerApp {
         if layout.window_size != self.layout.window_size {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(layout.window_size.into()));
         }
+        self.artwork.reload_icons(ctx);
+        self.avatar_images = load_avatar_images(ctx);
         self.theme = theme;
         self.layout = layout;
         self.appearance_message = appearance_warnings([theme_warning, layout_warning, font_warning]);
@@ -406,7 +413,7 @@ impl BunkerApp {
     fn avatar_widget(&self, ui: &mut egui::Ui, avatar: u8, selected: bool, size: f32) -> egui::Response {
         let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 4.0, avatar_color(avatar).gamma_multiply(0.55));
+        painter.rect_filled(rect, 0u8, avatar_color(avatar).gamma_multiply(0.55));
         if let Some(texture) = self.avatar_images.get(avatar.saturating_sub(1) as usize).and_then(Option::as_ref) {
             painter.image(
                 texture.id(), rect.shrink(2.0),
@@ -420,301 +427,407 @@ impl BunkerApp {
             );
         }
         painter.rect_stroke(
-            rect, 4.0,
-            Stroke::new(if selected { 2.0_f32 } else { 1.0_f32 }, if selected { self.theme.palette.accent.color() } else { self.theme.palette.button.color() }),
+            rect, 0u8,
+            Stroke::new(2.0_f32, if selected { self.theme.palette.accent.color() } else { self.theme.palette.text.color() }),
             egui::StrokeKind::Outside,
         );
         response
     }
     fn ui_welcome(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(ui.available_height().max(300.0) * 0.16);
+        ui.add_space(ui.available_height() * self.layout.welcome_top_fraction);
         ui.vertical_centered(|ui| {
-            ui.label(RichText::new("Добро пожаловать в Бункер!").size(self.theme.fonts.title).color(self.theme.palette.accent.color()).strong());
-            ui.add_space(7.0);
-            ui.label("Выбери ник и аватар — или оставь поля пустыми, чтобы получить случайные.");
-            ui.add_space(35.0);
-            ui.horizontal(|ui| {
-                let row_width = 70.0 + self.layout.welcome_name_width
-                    + self.theme.buttons.accent_size[0] + 2.0 * ui.spacing().item_spacing.x;
-                ui.add_space((ui.available_width() - row_width).max(0.0) * 0.5);
-                if self.avatar_widget(ui, self.avatar.unwrap_or(1), self.avatar.is_some(), 70.0).clicked() {
+            ui.label(RichText::new("Добро пожаловать в Бункер!")
+                .size(self.theme.fonts.title).color(self.theme.palette.accent_title.color()).strong());
+            ui.label("Для старта выберите никнейм и аватар (только при первом запуске)");
+            ui.add_space(24.0);
+
+            let side = self.layout.entry_button_size;
+            let gaps = 2.0 * ui.spacing().item_spacing.x;
+            let field = self.layout.welcome_name_width.min((ui.available_width() - 2.0 * side - gaps).max(60.0));
+            centered_row(ui, 2.0 * side + field + gaps, side, |ui| {
+                if self.avatar_widget(ui, self.avatar.unwrap_or(1), self.avatar.is_some(), side)
+                    .on_hover_text("Выбрать аватар").clicked()
+                {
                     self.show_avatar_picker = true;
                 }
-                ui.add(egui::TextEdit::singleline(&mut self.nickname)
-                    .hint_text("Выживший #8549").desired_width(self.layout.welcome_name_width.min((ui.available_width() - self.theme.buttons.accent_size[0] - 100.0).max(80.0))));
-                if ui.add(self.theme.accent_button("Продолжить →")).clicked() {
+                let nickname = input_row(ui, &mut self.nickname, "Выживший #8549", field, side, self.theme.palette.input.color());
+                let button = self.artwork.button(Icon::Login, "→", self.theme.fonts.icon);
+                let submit = flat_button(ui, [side; 2], button, self.theme.accent_gradient(), self.theme.buttons.radius)
+                    .on_hover_text("Продолжить");
+                if submit.clicked() || (nickname.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+                    self.show_avatar_picker = false;
                     self.complete_profile();
                 }
             });
-            ui.label(RichText::new("Нажми на аватар для выбора. Пропущенное заполнится автоматически.").color(self.theme.palette.muted.color()));
         });
     }
+
     fn ui_main_menu(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(ui.available_height().max(300.0) * self.layout.menu_top_fraction);
-        ui.vertical_centered(|ui| {
-            ui.horizontal(|ui| {
-                ui.add_space((ui.available_width() - 260.0).max(0.0) * 0.5);
-                self.avatar_widget(ui, self.avatar.unwrap_or(1), true, 58.0);
-                ui.label(RichText::new(&self.nickname).size(self.theme.fonts.heading).strong());
-            });
-            ui.add_space(52.0);
-            ui.horizontal(|ui| {
-                let [width, height] = self.theme.buttons.menu_size;
-                let gaps = 2.0 * ui.spacing().item_spacing.x;
-                let width = width.min(((ui.available_width() - gaps) / 3.0).max(1.0));
-                ui.add_space((ui.available_width() - 3.0 * width - gaps).max(0.0) * 0.5);
-                if ui.add_sized([width, height], egui::Button::new(with_icon(&self.theme.icons.join, "Присоединиться к игре")).wrap()).clicked() {
-                    self.show_join = true;
-                }
-                if ui.add_sized([width, height], self.theme.accent_button(with_icon(&self.theme.icons.create, "Создать игру")).min_size(egui::Vec2::ZERO).wrap()).clicked() {
-                    self.show_create = true;
-                }
-                if ui.add_sized([width, height], egui::Button::new(with_icon(&self.theme.icons.settings, "Настройки")).wrap()).clicked() {
-                    self.show_settings = true;
-                }
-            });
+        ui.add_space(ui.available_height() * self.layout.menu_top_fraction);
+        let font = egui::FontId::proportional(self.theme.fonts.heading);
+        let name_width = ui.painter().layout_no_wrap(self.nickname.clone(), font, Color32::WHITE).size().x;
+        let side = self.layout.profile_avatar_size;
+        let gap = ui.spacing().item_spacing.x;
+        let row_width = (side + gap + name_width + 4.0).min(ui.available_width());
+        centered_row(ui, row_width, side, |ui| {
+            if self.avatar_widget(ui, self.avatar.unwrap_or(1), false, side)
+                .on_hover_text("Сменить аватар").clicked()
+            {
+                self.show_avatar_picker = true;
+            }
+            ui.add(egui::Label::new(RichText::new(&self.nickname).size(self.theme.fonts.heading).strong()).truncate());
+        });
+        ui.add_space(self.layout.menu_profile_gap);
+
+        let [width, height] = self.theme.buttons.menu_size;
+        let width = width.min(((ui.available_width() - 2.0 * gap) / 3.0).max(20.0));
+        centered_row(ui, 3.0 * width + 2.0 * gap, height, |ui| {
+            let neutral = [self.theme.palette.button.color(); 2];
+            let radius = self.theme.buttons.radius;
+            let size = [width, height];
+            let join = with_icon(&self.theme.icons.join, "Присоединиться к игре");
+            let create = with_icon(&self.theme.icons.create, "Создать игру");
+            let settings = with_icon(&self.theme.icons.settings, "Настройки");
+            if flat_button(ui, size, egui::Button::new(join).wrap(), neutral, radius).clicked() {
+                self.show_join = true;
+            }
+            if flat_button(ui, size, egui::Button::new(RichText::new(create).color(self.theme.palette.accent_text.color())).wrap(),
+                self.theme.accent_gradient(), radius).clicked()
+            {
+                self.show_create = true;
+            }
+            if flat_button(ui, size, egui::Button::new(settings).wrap(), neutral, radius).clicked() {
+                self.show_settings = true;
+            }
         });
     }
+
     fn ui_lobby(&mut self, ui: &mut egui::Ui, room: &Room) {
         let host = room.you == room.host_id;
-        ui.add_space(38.0);
+        let height = ui.available_height();
+        ui.add_space(0.10 * height);
         ui.vertical_centered(|ui| {
-            ui.label(RichText::new(format!("Лобби: {}", room.code)).size(self.theme.fonts.title).strong());
-            ui.label(RichText::new(format!("Игроки: {} из 15 · Пак: {}", room.players.len(), room.pack_name)).color(self.theme.palette.muted.color()));
+            ui.label(RichText::new(format!("Лобби: {}", room.code)).size(self.theme.fonts.heading).strong());
+            ui.label(format!("Игроки: {} из 15", room.players.len())).on_hover_text(&room.pack_name);
         });
-        ui.add_space(32.0);
-        let count = room.players.len();
+        ui.add_space(14.0);
+
+        let [action_width, action_height] = self.theme.buttons.menu_size;
+        let roster_height = (ui.available_height() - action_height - 38.0).max(75.0);
         let columns = self.layout.lobby_columns;
-        ui.columns(columns, |cols| {
-            for (i, player) in room.players.iter().enumerate() {
-                cols[i % columns].horizontal(|ui| {
-                    ui.label(RichText::new("▏").size(40.0).color(if player.ready || player.id == room.host_id { self.theme.palette.positive.color() } else { self.theme.palette.negative.color() }));
-                    self.avatar_widget(ui, player.avatar, false, self.layout.lobby_avatar_size);
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(&player.name).size(self.theme.fonts.body).strong());
-                        if player.id == room.host_id {
-                            ui.label(RichText::new(with_icon(&self.theme.icons.host, "Ведущий")).color(self.theme.palette.accent.color()).size(self.theme.fonts.small));
-                        } else {
-                            ui.label(RichText::new(if player.ready { "Готов" } else { "Не готов" })
-                                .color(if player.ready { self.theme.palette.positive.color() } else { self.theme.palette.negative.color() }).size(self.theme.fonts.small));
+        let side = self.layout.lobby_avatar_size;
+        let roster_width = ui.available_width() * 0.82;
+        centered_row(ui, roster_width, roster_height, |ui| {
+            ui.vertical(|ui| {
+                ui.set_width(roster_width);
+                egui::ScrollArea::vertical().id_salt("lobby-roster").max_height(roster_height).show(ui, |ui| {
+                    ui.columns(columns, |cols| {
+                        for (index, player) in room.players.iter().enumerate() {
+                            let column = &mut cols[index % columns];
+                            let player_is_host = player.id == room.host_id;
+                            let ready = player.ready || player_is_host;
+                            column.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.set_height(28.0);
+                                    if player_is_host {
+                                        ui.horizontal(|ui| {
+                                            ui.add_space(side * 0.30);
+                                            if let Some(icon) = self.artwork.icon(Icon::Host, 26.0) {
+                                                ui.add(icon).on_hover_text("Ведущий");
+                                            } else {
+                                                ui.label(RichText::new(&self.theme.icons.host).color(self.theme.palette.accent.color())).on_hover_text("Ведущий");
+                                            }
+                                        });
+                                    }
+                                });
+                            });
+                            column.horizontal(|ui| {
+                                let color = if ready { self.theme.palette.positive.color() } else { self.theme.palette.negative.color() };
+                                let (bar, _) = ui.allocate_exact_size(egui::vec2(4.0, side), egui::Sense::hover());
+                                ui.painter().rect_filled(bar, 0u8, color);
+                                self.avatar_widget(ui, player.avatar, false, side);
+                                ui.add(egui::Label::new(RichText::new(&player.name).size(self.theme.fonts.body).strong()).truncate());
+                            });
                         }
                     });
                 });
-                if i % columns == columns - 1 { cols[0].add_space(9.0); }
-            }
-        });
-        if count == 0 { ui.label("Нет игроков"); }
-        ui.add_space(48.0);
-        ui.vertical_centered(|ui| {
-            ui.horizontal(|ui| {
-                ui.add_space((ui.available_width() - 520.0).max(0.0) * 0.5);
-                if ui.button("Выйти из комнаты").clicked() { self.leave_room(); }
-                if host {
-                    let ready = room.players.len() >= 2 &&
-                        room.players.iter().all(|p| p.id == room.host_id || p.ready);
-                    let response = ui.add_enabled(ready, self.theme.accent_button("Начать игру"));
-                    if response.clicked() { self.send(json!({"type":"start"})); }
-                    if !ready {
-                        response.on_hover_text("Все участники должны нажать «Готов». Минимум два игрока.");
-                    }
-                } else {
-                    let ready = room.players.iter().find(|p| p.id == room.you).map(|p| p.ready).unwrap_or(false);
-                    if ui.add(self.theme.accent_button(if ready { "Не готов" } else { "Готов" })).clicked() {
-                        self.send(json!({"type":"set_ready","ready":!ready}));
-                    }
-                }
-                if ui.button("Настройки").clicked() { self.show_host_tools = true; }
             });
-            if host {
-                ui.add_space(13.0);
-                ui.label(RichText::new("Ведущий начинает игру, когда готовы все участники.").color(self.theme.palette.muted.color()));
+        });
+
+        let gap = ui.spacing().item_spacing.x;
+        let action_width = action_width.min(((ui.available_width() - 2.0 * gap) / 2.6).max(20.0));
+        let side_width = action_width * 0.8;
+        centered_row(ui, action_width + 2.0 * side_width + 2.0 * gap, action_height, |ui| {
+            let neutral = [self.theme.palette.button.color(); 2];
+            let radius = self.theme.buttons.radius;
+            let side_size = [side_width, action_height * 0.8];
+            if flat_button(ui, side_size, egui::Button::new("Покинуть игру"), neutral, radius).clicked() {
+                self.leave_room();
+                return;
+            }
+            let ready = room.players.iter().any(|p| p.id == room.you && p.ready);
+            let can_start = room.players.len() >= 2 && room.players.iter().all(|p| p.id == room.host_id || p.ready);
+            let label = if host { "Начать игру" } else if ready { "Не готов" } else { "Готов" };
+            let palette = &self.theme.palette;
+            let fill = if !host && !ready { [palette.ready.color(), palette.ready_end.color()] } else { self.theme.accent_gradient() };
+            let button = ui.add_enabled_ui(!host || can_start, |ui| {
+                flat_button(ui, [action_width, action_height], egui::Button::new(label), fill, radius)
+            }).inner;
+            if host && !can_start {
+                button.on_disabled_hover_text("Нужны минимум два игрока. Все гости должны нажать «Готов».");
+            } else if button.clicked() {
+                if host { self.send(json!({"type":"start"})); }
+                else { self.send(json!({"type":"set_ready","ready":!ready})); }
+            }
+            if flat_button(ui, side_size, egui::Button::new("Настройки"), neutral, radius).clicked() {
+                self.show_host_tools = true;
             }
         });
     }
+
     fn at_section(&mut self, ui: &mut egui::Ui, index: usize) {
+        let viewport = ui.clip_rect();
+        if ui.cursor().top() <= viewport.top() + 0.25 * viewport.height() {
+            self.active_section = index;
+        }
         if self.pending_section == Some(index) {
             ui.scroll_to_rect(ui.cursor(), Some(egui::Align::Min));
+            self.active_section = index;
             self.pending_section = None;
         }
     }
+
     fn hero(&mut self, ui: &mut egui::Ui, room: &Room) {
         self.at_section(ui, 0);
         let width = ui.available_width();
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, self.layout.hero_height), egui::Sense::hover());
+        let height = self.layout.hero_height;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, self.theme.buttons.radius, self.theme.palette.hero.color());
+        painter.rect_filled(rect, 0u8, self.theme.palette.hero.color());
         if let Some(texture) = &self.hero_texture {
-            painter.image(texture.id(), rect, egui::Rect::from_min_max(
-                egui::pos2(0.0,0.0),egui::pos2(1.0,1.0)), Color32::from_white_alpha(185));
+            paint_cover(&painter, texture, rect);
+            painter.add(paint_gradient(rect, Color32::from_black_alpha(100), self.theme.palette.background.color(), true));
+        } else if let Some(texture) = &self.artwork.catastrophe {
+            paint_cover(&painter, texture, rect);
         }
-        painter.rect_filled(rect, self.theme.buttons.radius, Color32::from_black_alpha(125));
-        painter.rect_stroke(rect, self.theme.buttons.radius, Stroke::new(1.0_f32, self.theme.palette.outline.color()), egui::StrokeKind::Outside);
-        ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink2(self.layout.hero_inset.into())), |ui| {
-            ui.add_space(self.layout.hero_top_gap);
-            ui.vertical_centered(|ui| {
-                ui.label(RichText::new("Катаклизм").size(self.theme.fonts.title).strong().color(self.theme.palette.text.color()));
-                ui.add_space(10.0);
-                ui.add_sized([ui.available_width().min(self.layout.hero_text_size[0]), self.layout.hero_text_size[1]],
-                    egui::Label::new(RichText::new(room.catastrophe.as_str()).size(self.theme.fonts.body).color(self.theme.palette.text.color())).wrap());
-                ui.add_space(9.0);
-                ui.label(RichText::new(format!("Раунд {} · Выживших: {}",
-                    room.round, room.players.iter().filter(|p| p.active).count())).color(self.theme.palette.accent.color()));
-            });
-        });
-        ui.add_space(10.0);
-        let sections = ["Катаклизм", "Бункер", "События", "Досье", "Игроки", "Спецвозможности"];
-        ui.horizontal_wrapped(|ui| {
-            for (i, label) in sections.into_iter().enumerate() {
-                let icon = &self.theme.icons.navigation[i];
-                let text = if icon.is_empty() { label } else { icon.as_str() };
-                let color = if i == 0 { self.theme.palette.accent.color() } else { self.theme.palette.text.color() };
-                if ui.add(egui::Button::new(RichText::new(text).size(self.theme.fonts.icon).color(color))
-                    .min_size(self.theme.buttons.navigation_size.into())).on_hover_text(label).clicked() {
-                    self.pending_section = Some(i);
-                }
-            }
+        let inset = self.layout.hero_inset;
+        let text_width = self.layout.hero_text_size[0].min((width - 2.0 * inset[0]).max(80.0));
+        let text_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.center().x - 0.5 * text_width, rect.top() + self.layout.hero_top_gap + inset[1]),
+            egui::vec2(text_width, (height - self.layout.hero_top_gap - inset[1]).max(80.0)),
+        );
+        let mut text = ui.new_child(egui::UiBuilder::new().max_rect(text_rect));
+        text.set_clip_rect(rect.intersect(ui.clip_rect()));
+        text.vertical_centered(|ui| {
+            ui.label(RichText::new("Катаклизм").size(self.theme.fonts.heading).strong());
+            ui.add_space(30.0);
+            let description = egui::Label::new(&room.catastrophe).wrap();
+            egui::ScrollArea::vertical().id_salt("catastrophe-description").max_height(self.layout.hero_text_size[1])
+                .show(ui, |ui| { ui.add(description); });
+            ui.add_space(30.0);
+            ui.label(format!("Раунд {} · Выживших: {}", room.round, room.players.iter().filter(|p| p.active).count()));
         });
     }
-    fn bunker_section(&mut self, ui: &mut egui::Ui, room: &Room) {
-        self.at_section(ui, 1);
-        heading(ui, &self.theme, "Информация о бункере");
-        egui::Frame::new().fill(self.theme.palette.surface.color())
-            .inner_margin(egui::Margin::same(self.layout.panel_padding)).show(ui, |ui| {
-                ui.columns(2, |columns| {
-                    columns[0].add(egui::Label::new(RichText::new(room.bunker.as_str()).size(self.theme.fonts.body)).wrap());
-                    columns[0].add_space(15.0);
-                    columns[0].label(RichText::new(format!("Количество мест: {}", room.seats)).size(self.theme.fonts.heading).strong().color(self.theme.palette.accent.color()));
-                    columns[1].vertical_centered(|ui| {
-                        ui.add_space(20.0);
-                        ui.label(RichText::new("◇").size(92.0).color(Color32::from_rgb(70,70,73)));
-                        ui.label(RichText::new("Схема бункера — WIP").color(self.theme.palette.muted.color()).italics());
+
+    fn game_navigation(&mut self, ctx: &egui::Context) {
+        let sections = ["Катаклизм", "Бункер", "События", "Досье", "Игроки", "Спецвозможности"];
+        egui::Area::new(egui::Id::new("game-section-nav"))
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -54.0))
+            .order(egui::Order::Foreground).movable(false).show(ctx, |ui| {
+                egui::Frame::new().fill(self.theme.palette.background.color()).inner_margin(8).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.horizontal(|ui| {
+                        for (index, (label, icon)) in sections.into_iter().zip(Icon::NAVIGATION).enumerate() {
+                            let fallback = &self.theme.icons.navigation[index];
+                            let button = self.artwork.button(icon, if fallback.is_empty() { label } else { fallback }, self.theme.fonts.icon);
+                            let colors = if index == self.active_section {
+                                self.theme.accent_gradient()
+                            } else {
+                                [self.theme.palette.button.color(); 2]
+                            };
+                            if flat_button(ui, self.theme.buttons.navigation_size, button, colors, self.theme.buttons.radius)
+                                .on_hover_text(label).clicked()
+                            {
+                                self.pending_section = Some(index);
+                                ctx.request_repaint();
+                            }
+                        }
                     });
                 });
             });
     }
+
+    fn bunker_section(&mut self, ui: &mut egui::Ui, room: &Room) {
+        self.at_section(ui, 1);
+        let width = ui.available_width();
+        let height = self.layout.section_min_height;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+        if let Some(texture) = &self.artwork.bunker {
+            let side = (0.36 * width).min(height);
+            let drawing = egui::Rect::from_min_size(egui::pos2(rect.right() - side, rect.center().y - side / 2.0), egui::vec2(side, side));
+            paint_cover(&ui.painter_at(rect), texture, drawing);
+        }
+        let margin = (0.083 * width).max(f32::from(self.layout.panel_padding));
+        let content = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + margin, rect.top() + 0.21 * height),
+            egui::vec2((width * 0.64 - margin).max(100.0), height * 0.72),
+        );
+        let mut body = ui.new_child(egui::UiBuilder::new().max_rect(content));
+        body.set_clip_rect(rect.intersect(ui.clip_rect()));
+        body.label(RichText::new("Информация о бункере").size(self.theme.fonts.heading).strong());
+        body.add_space(self.theme.spacing.heading_gap);
+        egui::ScrollArea::vertical().id_salt("bunker-description").max_height(height * 0.45).show(&mut body, |ui| {
+            ui.add(egui::Label::new(&room.bunker).wrap());
+        });
+        body.add_space(16.0);
+        body.label(RichText::new(format!("Количество мест: {}", room.seats)).size(self.theme.fonts.heading).strong());
+    }
+
     fn event_section(&mut self, ui: &mut egui::Ui, room: &Room) {
         self.at_section(ui, 2);
+        let top = ui.cursor().top();
+        ui.add_space(36.0);
         heading(ui, &self.theme, "События");
         ui.vertical_centered(|ui| {
             ui.label(RichText::new("UNDER CONSTRUCTION").size(self.theme.fonts.heading).strong().color(self.theme.palette.negative.color()));
             ui.label(RichText::new(format!("Шанс события: {}% · Реальные события пока не запускаются",
                 room.event_chance)).color(self.theme.palette.muted.color()));
         });
-        ui.add_space(12.0);
+        ui.add_space((self.layout.section_min_height - (ui.cursor().top() - top)).max(0.0));
     }
     fn dossier_section(&mut self, ui: &mut egui::Ui, room: &Room) {
         self.at_section(ui, 3);
-        let me = match room.players.iter().find(|p| p.id == room.you) {
-            Some(p) => p, None => return
-        };
+        let Some(me) = room.players.iter().find(|p| p.id == room.you) else { return; };
+        let top = ui.cursor().top();
+        ui.add_space(44.0);
         heading(ui, &self.theme, &format!("Досье игрока {}", me.name));
+        let (abilities, cards): (Vec<_>, Vec<_>) = me.cards.iter().partition(|card| matches!(card.kind.as_str(), "ability" | "ability2"));
         let columns = self.layout.dossier_columns;
-        ui.columns(columns, |cols| {
-            for (i, card) in me.cards.iter().enumerate() {
-                let col = &mut cols[i % columns];
-                egui::Frame::new().fill(self.theme.palette.surface.color())
-                    .inner_margin(egui::Margin::symmetric(self.layout.dossier_padding[0], self.layout.dossier_padding[1])).show(col, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(RichText::new(
-                                room.category_labels.get(&card.kind).map(String::as_str)
-                                    .unwrap_or_else(|| category_name(&card.kind))
-                            ).color(self.theme.palette.muted.color()));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let icon = if card.revealed { &self.theme.icons.unlocked } else { &self.theme.icons.locked };
-                                let marker = if icon.is_empty() {
-                                    if card.revealed { "Открыто" } else { "Открыть" }
-                                } else { icon.as_str() };
-                                let color = if card.revealed { self.theme.palette.positive.color() } else { self.theme.palette.negative.color() };
-                                if ui.add(egui::Button::new(RichText::new(marker).color(color)).frame(false))
-                                    .on_hover_text(if card.revealed { "Уже открыто" } else { "Открыть карту всем игрокам" }).clicked()
-                                    && !card.revealed && me.active {
-                                    self.send(json!({"type":"reveal","kind":card.kind}));
-                                }
-                                ui.label(RichText::new(&card.value).color(self.theme.palette.accent.color()));
-                            });
-                        });
-                    });
-            }
+        let per_column = cards.len().div_ceil(columns);
+        let inset = ui.available_width() * 0.08;
+        egui::Frame::new().inner_margin(egui::Margin::symmetric(inset.min(127.0) as i8, 0)).show(ui, |ui| {
+            ui.columns(columns, |cols| {
+                for (index, card) in cards.into_iter().enumerate() {
+                    self.dossier_card(&mut cols[index / per_column], room, card, me.active);
+                }
+            });
+            ui.add_space(8.0);
+            ui.vertical_centered(|ui| {
+                let width = (ui.available_width() * 0.64).max(320.0);
+                ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_width(width);
+                    for card in abilities {
+                        self.dossier_card(ui, room, card, me.active);
+                    }
+                });
+            });
         });
+        ui.add_space((self.layout.section_min_height - (ui.cursor().top() - top)).max(0.0));
     }
+
+    fn dossier_card(&mut self, ui: &mut egui::Ui, room: &Room, card: &Card, active: bool) {
+        let [x, y] = self.layout.dossier_padding;
+        let palette = &self.theme.palette;
+        let text = palette.text.color();
+        let accent = palette.accent_title.color();
+        let line = palette.surface.color();
+        let name = room.category_labels.get(&card.kind).map(String::as_str).unwrap_or_else(|| category_name(&card.kind));
+        egui::Frame::new().inner_margin(egui::Margin::symmetric(x, y)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(name).color(text).size(self.theme.fonts.small));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (icon, marker, tooltip) = if card.revealed {
+                        (Icon::Unlocked, &self.theme.icons.unlocked, "Уже открыто")
+                    } else {
+                        (Icon::Locked, &self.theme.icons.locked, "Открыть карту всем игрокам")
+                    };
+                    let marker = if marker.is_empty() { "Открыть" } else { marker.as_str() };
+                    let button = self.artwork.button(icon, marker, 17.0).frame(false);
+                    if ui.add_enabled(active && !card.revealed, button).on_hover_text(tooltip).clicked() {
+                        self.send(json!({"type":"reveal","kind":card.kind}));
+                    }
+                    ui.add(egui::Label::new(RichText::new(&card.value).color(accent).size(self.theme.fonts.small)).wrap());
+                });
+            });
+        });
+        let (rule, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+        ui.painter().rect_filled(rule, 0u8, line);
+    }
+
     fn edit_card(&mut self, player_id: &str, kind: &str, value: &str) {
         self.editor = Some((player_id.to_owned(), kind.to_owned()));
         self.editor_value = value.to_owned();
     }
+
     fn overview_section(&mut self, ui: &mut egui::Ui, room: &Room) {
         self.at_section(ui, 4);
+        ui.add_space(30.0);
         let count = room.players.iter().filter(|p| p.active).count();
         heading(ui, &self.theme, &format!("Желающие попасть в бункер: {}/{}", count, room.players.len()));
-        let keys = ["gender","body","personality","profession","health","hobby","fear","equipment","backpack","fact"];
-        let host = room.you == room.host_id;
-        egui::ScrollArea::horizontal().id_salt("player-matrix").show(ui, |ui| {
-            egui::Grid::new("players-matrix-grid").spacing(egui::vec2(8.0,9.0))
-                .striped(true).show(ui, |ui| {
-                    ui.add_sized([145.0,36.0], egui::Label::new("Игрок"));
-                    for kind in keys {
-                        ui.add_sized([self.layout.players_cell_size[0], 36.0], egui::Label::new(
-                            RichText::new(room.category_labels.get(kind).map(String::as_str).unwrap_or(kind))
-                                .size(self.theme.fonts.small).color(self.theme.palette.muted.color())
-                        ).wrap());
-                    }
-                    ui.end_row();
-                    for p in &room.players {
-                        ui.horizontal(|ui| {
-                            self.avatar_widget(ui, p.avatar, false, 30.0);
-                            ui.vertical(|ui| {
-                                ui.label(RichText::new(&p.name).strong());
-                                ui.label(RichText::new(if p.active { "Участник" } else { "Выбыл" })
-                                    .color(if p.active { self.theme.palette.muted.color() } else { self.theme.palette.negative.color() }).size(self.theme.fonts.small));
-                            });
-                        });
-                        for kind in keys {
-                            let cell = p.cards.iter().find(|c| c.kind == kind);
-                            ui.horizontal(|ui| {
-                                let label = cell.map(|c| card_text(&c.value)).unwrap_or_else(|| with_icon(&self.theme.icons.locked, "Закрыто"));
-                                let response = ui.add_sized(self.layout.players_cell_size, egui::Label::new(label).wrap());
-                                if let Some(card) = cell { response.on_hover_text(&card.value); }
-                                if host {
-                                    if ui.small_button(if self.theme.icons.edit.is_empty() { "Изменить" } else { self.theme.icons.edit.as_str() }).on_hover_text("Изменить карточку").clicked() {
-                                        self.edit_card(&p.id, kind, cell.map(|c| c.value.as_str()).unwrap_or(""));
-                                    }
-                                }
-                            });
-                        }
-                        ui.end_row();
-                    }
-                });
-        });
+        let keys = ["gender", "body", "personality", "profession", "health", "hobby", "fear", "equipment", "backpack", "fact"];
+        self.player_table(ui, room, "player-matrix", &keys, self.layout.players_cell_size);
     }
+
     fn abilities_section(&mut self, ui: &mut egui::Ui, room: &Room) {
         self.at_section(ui, 5);
-        heading(ui, &self.theme, "Таблица специальных возможностей");
+        ui.add_space(30.0);
+        heading(ui, &self.theme, "Таблица спец. возможностей");
+        self.player_table(ui, room, "ability-matrix", &["ability", "ability2"], self.layout.abilities_cell_size);
+    }
+
+    fn player_table(&mut self, ui: &mut egui::Ui, room: &Room, id: &str, keys: &[&str], cell: [f32; 2]) {
         let host = room.you == room.host_id;
-        egui::ScrollArea::horizontal().id_salt("ability-matrix").show(ui, |ui| {
-            egui::Grid::new("special-cards-grid").spacing(egui::vec2(18.0, 12.0))
-                .striped(true).show(ui, |ui| {
-                    ui.add_sized([175.0,35.0], egui::Label::new("Игрок"));
-                    ui.add_sized([self.layout.abilities_cell_size[0], 35.0], egui::Label::new("Спец. возможность 1"));
-                    ui.add_sized([self.layout.abilities_cell_size[0], 35.0], egui::Label::new("Спец. возможность 2"));
+        let player_width = 130.0;
+        let width = player_width + keys.len() as f32 * cell[0];
+        let offset = ((ui.available_width() - width) * 0.5).max(0.0);
+        let line = self.theme.palette.button.color();
+        egui::ScrollArea::horizontal().id_salt(id).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.add_space(offset);
+                egui::Grid::new(id).spacing([0.0, 0.0]).show(ui, |ui| {
+                    ui.add_sized([player_width, 36.0], egui::Label::new("Игрок"));
+                    for &kind in keys {
+                        let name = room.category_labels.get(kind).map(String::as_str).unwrap_or_else(|| category_name(kind));
+                        ui.add_sized([cell[0], 36.0], egui::Label::new(RichText::new(name).size(self.theme.fonts.small)).wrap());
+                    }
                     ui.end_row();
-                    for p in &room.players {
-                        ui.horizontal(|ui| { self.avatar_widget(ui, p.avatar, false, 29.0); ui.label(&p.name); });
-                        for kind in ["ability", "ability2"] {
-                            let card = p.cards.iter().find(|c| c.kind == kind);
-                            ui.horizontal(|ui| {
-                                let value = card.map(|c| card_text(&c.value)).unwrap_or_else(|| with_icon(&self.theme.icons.locked, "Закрыто"));
-                                let response = ui.add_sized(self.layout.abilities_cell_size, egui::Label::new(value).wrap());
-                                if let Some(card) = card { response.on_hover_text(&card.value); }
-                                if host && ui.small_button(if self.theme.icons.edit.is_empty() { "Изменить" } else { self.theme.icons.edit.as_str() }).clicked() {
-                                    self.edit_card(&p.id, kind, card.map(|c| c.value.as_str()).unwrap_or(""));
+                    for player in &room.players {
+                        table_cell(ui, [player_width, cell[1]], line, |ui| {
+                            self.avatar_widget(ui, player.avatar, false, (cell[1] - 8.0).min(35.0));
+                            ui.vertical(|ui| {
+                                ui.add(egui::Label::new(RichText::new(&player.name).size(self.theme.fonts.small).strong()).truncate());
+                                let color = if player.active { self.theme.palette.muted.color() } else { self.theme.palette.negative.color() };
+                                ui.label(RichText::new(if player.active { "Участник" } else { "Выбыл" }).color(color).size(self.theme.fonts.small));
+                            });
+                        });
+                        for &kind in keys {
+                            let card = player.cards.iter().find(|card| card.kind == kind);
+                            table_cell(ui, cell, line, |ui| {
+                                if host {
+                                    let icon = self.artwork.button(Icon::Edit, &self.theme.icons.edit, 13.0).frame(false);
+                                    if ui.add(icon).on_hover_text("Изменить карточку").clicked() {
+                                        self.edit_card(&player.id, kind, card.map(|card| card.value.as_str()).unwrap_or(""));
+                                    }
+                                }
+                                if let Some(card) = card {
+                                    ui.add(egui::Label::new(RichText::new(card_text(&card.value)).size(self.theme.fonts.small)).wrap()).on_hover_text(&card.value);
+                                } else if let Some(icon) = self.artwork.icon(Icon::Locked, 12.0) {
+                                    ui.add(icon).on_hover_text("Закрыто");
+                                } else {
+                                    ui.label(RichText::new("Закрыто").size(self.theme.fonts.small));
                                 }
                             });
                         }
                         ui.end_row();
                     }
                 });
+            });
         });
     }
+
     fn ui_game(&mut self, ui: &mut egui::Ui, room: &Room) {
+        self.active_section = 0;
         egui::ScrollArea::vertical().id_salt("entire-game").auto_shrink([false,false]).show(ui, |ui| {
             self.hero(ui, room);
             section_rule(ui, &self.theme);
@@ -776,68 +889,96 @@ impl BunkerApp {
     }
     fn ui_overlays(&mut self, ctx: &egui::Context) {
         if self.show_avatar_picker {
-            let mut open = true;
-            egui::Window::new("Выбор аватара").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open).show(ctx, |ui| {
-                ui.label("Аватарки: папка avatars рядом с EXE, файлы 01.png–12.png. При отсутствии файла — цветной значок.");
-                egui::Grid::new("avatar-selector-grid").num_columns(self.layout.avatar_picker_columns.into()).spacing(self.theme.spacing.items).show(ui, |ui| {
-                    for id in 1..=12 {
-                        if self.avatar_widget(ui, id, self.avatar == Some(id), self.layout.avatar_picker_size).clicked() {
-                            self.avatar = Some(id);
-                            self.show_avatar_picker = false;
-                        }
-                        if id % self.layout.avatar_picker_columns == 0 { ui.end_row(); }
+            let modal = egui::Modal::new(egui::Id::new("choose-avatar"))
+                .frame(egui::Frame::new().fill(self.theme.palette.panel.color()).corner_radius(5u8)
+                    .stroke(Stroke::new(1.0_f32, self.theme.palette.accent.color())).inner_margin(15))
+                .show(ctx, |ui| {
+                    let columns = self.layout.avatar_picker_columns;
+                    let gap = ui.spacing().item_spacing.x;
+                    let side = self.layout.avatar_picker_size.min(
+                        (ctx.content_rect().width() - gap * f32::from(columns - 1) - 60.0) / f32::from(columns)
+                    );
+                    let grid_width = side * f32::from(columns) + gap * f32::from(columns - 1);
+                    ui.set_width(grid_width);
+                    ui.vertical_centered(|ui| { ui.label("Выберите аватар:"); });
+                    ui.add_space(8.0);
+                    for row in (1u8..=12).collect::<Vec<_>>().chunks(usize::from(columns)) {
+                        let width = side * row.len() as f32 + gap * (row.len() - 1) as f32;
+                        centered_row(ui, width, side, |ui| {
+                            for &id in row {
+                                if self.avatar_widget(ui, id, self.avatar == Some(id), side).clicked() {
+                                    self.avatar = Some(id);
+                                    self.show_avatar_picker = false;
+                                    if self.profile_ready { self.save_config(); }
+                                }
+                            }
+                        });
                     }
                 });
-            });
-            self.show_avatar_picker &= open;
+            if modal.should_close() { self.show_avatar_picker = false; }
         }
         if self.show_join {
-            let mut open = true;
-            egui::Window::new("Присоединиться к игре").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open).show(ctx, |ui| {
-                ui.label("Введи код комнаты:");
-                ui.add(egui::TextEdit::singleline(&mut self.join_code).desired_width(260.0));
-                if ui.add(self.theme.accent_button("Присоединиться →")).clicked() {
-                    let code = self.join_code.trim().to_uppercase();
-                    if code.len() == 8 && code.chars().all(|c| c.is_ascii_alphanumeric()) {
-                        self.start_request(Some(code));
-                        self.show_join = false;
-                    } else { self.status = "Нужен восьмисимвольный код".into(); }
-                }
-            });
-            self.show_join &= open;
+            let modal = egui::Modal::new(egui::Id::new("join-room"))
+                .frame(egui::Frame::new().fill(self.theme.palette.background.color()).inner_margin(12))
+                .show(ctx, |ui| {
+                    let side = self.layout.entry_button_size;
+                    let field = self.layout.welcome_name_width;
+                    let row_width = side + field + ui.spacing().item_spacing.x;
+                    ui.set_width(row_width);
+                    centered_row(ui, row_width, side, |ui| {
+                        let field = input_row(ui, &mut self.join_code, "Введите код игры", field, side, self.theme.palette.input.color());
+                        let button = self.artwork.button(Icon::Join, "→", self.theme.fonts.icon);
+                        let submit = flat_button(ui, [side; 2], button, self.theme.accent_gradient(), self.theme.buttons.radius)
+                            .on_hover_text("Присоединиться");
+                        if submit.clicked() || (field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+                            let code = self.join_code.trim().to_uppercase();
+                            if code.len() == 8 && code.chars().all(|c| c.is_ascii_alphanumeric()) {
+                                self.start_request(Some(code));
+                                self.show_join = false;
+                            } else {
+                                self.status = "Нужен восьмисимвольный код".into();
+                            }
+                        }
+                    });
+                });
+            if modal.should_close() { self.show_join = false; }
         }
         if self.show_create {
             let mut open = true;
             egui::Window::new("Создать игру").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open)
                 .min_width(self.layout.dialog_width).default_width(self.layout.dialog_width).show(ctx, |ui| {
-                ui.label(RichText::new("Набор карт").strong().size(self.theme.fonts.body));
-                ui.label(if self.pack_file.is_empty() { "Murr: стартовый набор" } else { &self.pack_file });
-                if ui.button("Выбрать JSON / ZIP-пак…").clicked() { self.pick_pack(); }
-                ui.label(RichText::new("ZIP: pack.json и изображения в assets/. Раздаётся остальным автоматически.").color(self.theme.palette.muted.color()).size(self.theme.fonts.small));
-                ui.separator();
-                ui.label(RichText::new("События").strong().size(self.theme.fonts.body));
-                ui.add(egui::Slider::new(&mut self.event_chance, 0..=100).text("Шанс появления, %"));
-                ui.label(RichText::new("WIP: параметр сохраняется в комнате, сами события пока не запускаются.").color(self.theme.palette.muted.color()));
-                ui.add_space(12.0);
-                if ui.add(self.theme.accent_button("Создать комнату")).clicked() {
-                    self.show_create = false;
-                    self.start_request(None);
-                }
+                ui.vertical_centered(|ui| {
+                    ui.label(RichText::new("Набор карт").strong().size(self.theme.fonts.body));
+                    ui.label(if self.pack_file.is_empty() { "Murr: стартовый набор" } else { &self.pack_file });
+                    if ui.button("Выбрать JSON / ZIP-пак…").clicked() { self.pick_pack(); }
+                    ui.label(RichText::new("ZIP: pack.json и изображения в assets/. Раздаётся остальным автоматически.").color(self.theme.palette.muted.color()).size(self.theme.fonts.small));
+                    ui.separator();
+                    ui.label(RichText::new("События").strong().size(self.theme.fonts.body));
+                    ui.add(egui::Slider::new(&mut self.event_chance, 0..=100).text("Шанс появления, %"));
+                    ui.label(RichText::new("WIP: параметр сохраняется в комнате, сами события пока не запускаются.").color(self.theme.palette.muted.color()));
+                    ui.add_space(12.0);
+                    if ui.add(self.theme.accent_button("Создать комнату")).clicked() {
+                        self.show_create = false;
+                        self.start_request(None);
+                    }
+                });
             });
             self.show_create &= open;
         }
         if self.show_settings {
             let mut open = true;
             egui::Window::new("Настройки").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open).show(ctx, |ui| {
-                ui.label("Адрес сервера:");
-                ui.add(egui::TextEdit::singleline(&mut self.server_url).desired_width(430.0));
+                ui.vertical_centered(|ui| {
+                    ui.label("Адрес сервера:");
+                    ui.add(egui::TextEdit::singleline(&mut self.server_url).desired_width(430.0));
 
-                if ui.button("Сохранить").clicked() { self.save_config(); }
-                ui.separator();
-                if ui.button("Перезагрузить оформление").on_hover_text("Ctrl+Shift+R").clicked() {
-                    self.reload_appearance(ctx);
-                }
-                ui.label(portable_path("theme.json").parent().unwrap_or(Path::new(".")).display().to_string());
+                    if ui.button("Сохранить").clicked() { self.save_config(); }
+                    ui.separator();
+                    if ui.button("Перезагрузить оформление").on_hover_text("Ctrl+Shift+R").clicked() {
+                        self.reload_appearance(ctx);
+                    }
+                    ui.label(portable_path("theme.json").parent().unwrap_or(Path::new(".")).display().to_string());
+                });
             });
             self.show_settings = open;
         }
@@ -952,7 +1093,10 @@ impl eframe::App for BunkerApp {
                 if let Some(room) = room {
                     match room.stage.as_str() {
                         "lobby" => self.ui_lobby(ui, &room),
-                        "playing" => self.ui_game(ui, &room),
+                        "playing" => {
+                            self.ui_game(ui, &room);
+                            self.game_navigation(ctx);
+                        },
                         _ => self.ui_finished(ui, &room)
                     }
                 } else if !self.profile_ready {

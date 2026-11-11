@@ -49,6 +49,11 @@ pub struct Palette {
     pub text: Rgb,
     pub muted: Rgb,
     pub accent: Rgb,
+    pub accent_end: Rgb,
+    pub accent_title: Rgb,
+    pub input: Rgb,
+    pub ready: Rgb,
+    pub ready_end: Rgb,
     pub accent_text: Rgb,
     pub positive: Rgb,
     pub negative: Rgb,
@@ -108,6 +113,11 @@ pub struct Layout {
     pub status_margin: i8,
     pub panel_padding: i8,
     pub menu_top_fraction: f32,
+    pub welcome_top_fraction: f32,
+    pub menu_profile_gap: f32,
+    pub profile_avatar_size: f32,
+    pub entry_button_size: f32,
+    pub section_min_height: f32,
     pub welcome_name_width: f32,
     pub lobby_columns: usize,
     pub lobby_avatar_size: f32,
@@ -144,8 +154,13 @@ impl Layout {
         range(self.window_size[0], 820.0, 2560.0)?;
         range(self.window_size[1], 560.0, 2560.0)?;
         range(self.menu_top_fraction, 0.0, 0.5)?;
+        range(self.welcome_top_fraction, 0.0, 0.5)?;
+        range(self.menu_profile_gap, 0.0, 90.0)?;
+        range(self.profile_avatar_size, 24.0, 100.0)?;
+        range(self.entry_button_size, 32.0, 100.0)?;
+        range(self.section_min_height, 240.0, 1000.0)?;
         range(self.hero_height, 240.0, 1000.0)?;
-        range(self.hero_top_gap, 0.0, 120.0)?;
+        range(self.hero_top_gap, 0.0, 240.0)?;
         range(self.welcome_name_width, 80.0, 480.0)?;
         range(self.dialog_width, 240.0, 700.0)?;
         range(self.lobby_avatar_size, 24.0, 88.0)?;
@@ -158,12 +173,16 @@ impl Layout {
         }
         range(self.lobby_columns as f32, 1.0, 4.0)?;
         range(self.dossier_columns as f32, 1.0, 3.0)?;
-        range(self.avatar_picker_columns.into(), 2.0, 6.0)?;
+        range(self.avatar_picker_columns.into(), 2.0, 8.0)?;
         Ok(())
     }
 }
 
 impl Theme {
+    pub fn accent_gradient(&self) -> [Color32; 2] {
+        [self.palette.accent.color(), self.palette.accent_end.color()]
+    }
+
     pub fn load() -> (Self, Option<String>) {
         load("theme.json", THEME, Self::validate)
     }
@@ -327,7 +346,8 @@ impl Fonts {
                     })
             })
         });
-        (data, warning)
+        let data = data.unwrap_or_else(|| include_bytes!("../assets/fonts/Manrope.ttf").to_vec());
+        (Some(data), warning)
     }
 }
 

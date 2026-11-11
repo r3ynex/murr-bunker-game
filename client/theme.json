@@ -1,9 +1,9 @@
 {
   "palette": {
     "background": [3, 3, 3],
-    "panel": [19, 19, 19],
+    "panel": [23, 23, 23],
     "surface": [19, 19, 19],
-    "status": [12, 12, 14],
+    "status": [3, 3, 3],
     "button": [61, 61, 61],
     "hover": [79, 67, 53],
     "pressed": [100, 71, 39],
@@ -11,33 +11,38 @@
     "text": [245, 245, 245],
     "muted": [156, 156, 164],
     "accent": [236, 137, 21],
-    "accent_text": [3, 3, 3],
-    "positive": [67, 200, 120],
-    "negative": [239, 84, 90],
-    "hero": [23, 22, 20],
-    "outline": [90, 66, 43]
+    "accent_text": [255, 255, 255],
+    "positive": [56, 255, 72],
+    "negative": [229, 37, 32],
+    "hero": [3, 3, 3],
+    "outline": [108, 76, 34],
+    "accent_end": [255, 177, 86],
+    "accent_title": [255, 177, 86],
+    "input": [33, 35, 36],
+    "ready": [0, 165, 179],
+    "ready_end": [10, 100, 65]
   },
   "fonts": {
     "family": "manrope",
     "file": null,
-    "body": 15,
-    "button": 15,
+    "body": 17,
+    "button": 17,
     "small": 12,
-    "heading": 27,
+    "heading": 24,
     "title": 33,
-    "icon": 20
+    "icon": 22
   },
   "buttons": {
     "accent_size": [155, 38],
-    "menu_size": [184, 52],
-    "navigation_size": [43, 38],
+    "menu_size": [245, 51],
+    "navigation_size": [32, 32],
     "padding": [8, 4],
-    "radius": 6
+    "radius": 0
   },
   "spacing": {
-    "items": [9, 11],
+    "items": [16, 8],
     "heading_gap": 10,
-    "section_gap": 30
+    "section_gap": 0
   },
   "icons": {
     "join": "",

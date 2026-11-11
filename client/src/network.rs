@@ -107,3 +107,43 @@ pub fn download_bundle(base_url: String, session: Session) -> Receiver<Result<Ve
     });
     rx
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::time::Instant;
+
+    #[test]
+    fn https_room_connection_starts_a_tls_handshake() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let session = Session {
+            code: "TESTROOM".into(),
+            player_id: "test-player".into(),
+            token: "test-token".into(),
+        };
+        let (_sender, receiver) =
+            connect(&format!("https://{}", listener.local_addr().unwrap()), &session).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                    let mut header = [0; 5];
+                    stream.read_exact(&mut header).expect("TLS record header");
+                    assert_eq!(header[0], 0x16, "the client must start with a TLS handshake");
+                    return;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if let Some(ewebsock::WsEvent::Error(error)) = receiver.try_recv() {
+                        panic!("WebSocket failed before the handshake: {error}");
+                    }
+                    assert!(Instant::now() < deadline, "WebSocket never connected");
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("could not accept local TLS connection: {error}"),
+            }
+        }
+    }
+}

@@ -17,7 +17,7 @@
 
 **Оформление:** цвета, шрифты, кнопки и размеры панелей настраиваются в `theme.json` и `layout.json` рядом с EXE. Перезагрузка в настройках или по **Ctrl+Shift+R**. [Инструкция по оформлению](client/APPEARANCE.md).
 
-**Manrope:** Windows-клиент использует Manrope, если рядом с EXE лежит твой `Manrope.zip` (с `static/Manrope-Regular.ttf`) или шрифт установлен в системе; иначе переключается на стандартный. Веб-тестер загружает Manrope через Google Fonts.
+**Manrope:** шрифт включён в Windows-клиент. В `theme.json` можно выбрать встроенные шрифты egui или задать свой TTF. Веб-тестер загружает Manrope через Google Fonts.
 
 **Свои аватарки:** помести `01.png`–`12.png` в папку `avatars` рядом с EXE. Поддерживаются PNG/JPG/WebP. Пошаговая инструкция: **[client/assets/avatars/README.md](client/assets/avatars/README.md)**. В репозитории эти же картинки можно добавить в `client/assets/avatars/` — Windows Actions включит их в релиз.
 
