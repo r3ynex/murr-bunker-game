@@ -5,6 +5,7 @@ mod appearance;
 mod artwork;
 mod model;
 mod network;
+mod packs;
 
 fn main() -> eframe::Result {
     let (layout, layout_warning) = appearance::Layout::load();

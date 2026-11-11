@@ -6,12 +6,11 @@ use eframe::egui::{self, Color32, RichText, Stroke};
 use ewebsock::{WsEvent, WsMessage, WsSender};
 use serde_json::{json, Value};
 use std::fs;
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const MAX_PACK_BYTES: usize = 2_000_000;
 
 const DOSSIER_LOCK_SIZE: f32 = 24.0;
 const DOSSIER_INFO_SIZE: f32 = 16.0;
@@ -183,9 +182,10 @@ pub struct BunkerApp {
     dice_sides: u32,
     event_chance: u32,
     pack_json: String,
-    pack_file: String,
+    room_packs: Vec<crate::packs::Entry>,
     pack_zip: Option<Vec<u8>>,
     upload_pending: Option<Receiver<Result<String, String>>>,
+    pack_upload_failed: bool,
     download_pending: Option<Receiver<Result<Vec<u8>, String>>>,
     background_sha: Option<String>,
     hero_texture: Option<egui::TextureHandle>,
@@ -225,9 +225,9 @@ impl BunkerApp {
             show_settings: false, show_host_tools: false, show_survivability: false,
             editor: None, editor_value: String::new(), pending_section: None, active_section: 0,
             dice_sides: 6, event_chance: 0,
-            pack_json: include_str!("../packs/demo.json").to_owned(),
-            pack_file: String::new(), pack_zip: None,
-            upload_pending: None, download_pending: None, background_sha: None,
+            pack_json: crate::packs::BASE.to_owned(),
+            room_packs: crate::packs::library(), pack_zip: None,
+            upload_pending: None, pack_upload_failed: false, download_pending: None, background_sha: None,
             hero_texture: None,
         }
     }
@@ -325,6 +325,8 @@ impl BunkerApp {
         self.session = None;
         self.room = None;
         self.clear_background();
+        self.upload_pending = None;
+        self.pack_upload_failed = false;
         self.create_on_connect = join.is_none();
         self.notify("Подключаемся к комнате…");
         self.pending = Some(network::request_room(
@@ -353,6 +355,8 @@ impl BunkerApp {
         }
     }
     fn apply_pack(&mut self) {
+        if self.upload_pending.is_some() { return; }
+        self.pack_upload_failed = false;
         if let Some(bytes) = &self.pack_zip {
             if let Some(session) = self.session.clone() {
                 self.upload_pending = Some(network::upload_bundle(
@@ -367,43 +371,19 @@ impl BunkerApp {
             }
         }
     }
-    fn load_pack_path(&mut self, path: &Path) {
-        let result = (|| -> Result<(String, Option<Vec<u8>>), String> {
-            let extension = path.extension().and_then(|x| x.to_str()).unwrap_or_default().to_lowercase();
-            if extension == "zip" {
-                let bytes = fs::read(path).map_err(|e| e.to_string())?;
-                if bytes.len() > MAX_PACK_BYTES { return Err("ZIP-пак больше 2 МБ".into()); }
-                let cursor = Cursor::new(bytes.as_slice());
-                let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;
-                let mut manifest = String::new();
-                archive.by_name("pack.json").map_err(|_| "Не найден pack.json в ZIP".to_owned())?
-                    .take(500_001).read_to_string(&mut manifest).map_err(|e| e.to_string())?;
-                serde_json::from_str::<Value>(&manifest).map_err(|e| e.to_string())?;
-                Ok((manifest, Some(bytes)))
-            } else if extension == "json" {
-                let text = fs::read_to_string(path).map_err(|e| e.to_string())?;
-                serde_json::from_str::<Value>(&text).map_err(|e| e.to_string())?;
-                Ok((text, None))
-            } else {
-                Err("Выбери файл .json или .zip".into())
-            }
-        })();
-        match result {
-            Ok((json, zip)) => {
-                self.pack_json = json;
-                self.pack_zip = zip;
-                self.pack_file = path.display().to_string();
-                self.notify(format!("Выбран пак: {}", path.display()));
-            }
-            Err(e) => self.notify(format!("Ошибка загрузки пака: {e}")),
-        }
-    }
     fn pick_pack(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Паки Murr", &["json", "zip"]).pick_file() {
-            self.load_pack_path(&path);
+        if let Some(path) = rfd::FileDialog::new().add_filter("Паки Murr", &["json", "zip"]).pick_file() {
+            match crate::packs::Pack::load(&path).and_then(|pack| pack.payload()) {
+                Ok((json, zip)) => {
+                    self.pack_json = json;
+                    self.pack_zip = zip;
+                    self.notify(format!("Выбран пак: {}", path.display()));
+                }
+                Err(error) => self.notify(format!("Ошибка загрузки пака: {error}")),
+            }
         }
     }
+
     fn clear_background(&mut self) {
         self.background_sha = None;
         self.download_pending = None;
@@ -454,7 +434,10 @@ impl BunkerApp {
             self.upload_pending = None;
             match reply {
                 Ok(name) => self.notify(format!("ZIP-пак «{name}» передан всем участникам")),
-                Err(e) => self.notify(format!("Ошибка ZIP-пака: {e}")),
+                Err(e) => {
+                    self.pack_upload_failed = true;
+                    self.notify(format!("Ошибка ZIP-пака: {e}"));
+                }
             }
         }
         let events: Vec<WsEvent> = self.receiver.as_ref()
@@ -674,7 +657,8 @@ impl BunkerApp {
                 return;
             }
             let ready = room.players.iter().any(|p| p.id == room.you && p.ready);
-            let can_start = room.players.len() >= 2 && room.players.iter().all(|p| p.id == room.host_id || p.ready);
+            let can_start = self.upload_pending.is_none() && !self.pack_upload_failed && room.players.len() >= 2
+                && room.players.iter().all(|p| p.id == room.host_id || p.ready);
             let label = if host { "Начать игру" } else if ready { "Не готов" } else { "Готов" };
             let palette = &self.theme.palette;
             let fill = if !host && !ready { [palette.ready.color(), palette.ready_end.color()] } else { self.theme.accent_gradient() };
@@ -682,7 +666,9 @@ impl BunkerApp {
                 flat_button(ui, [action_width, action_height], egui::Button::new(label), fill, radius)
             }).inner;
             if host && !can_start {
-                button.on_disabled_hover_text("Нужны минимум два игрока. Все гости должны нажать «Готов».");
+                button.on_disabled_hover_text(if self.upload_pending.is_some() { "Пак ещё загружается." }
+                    else if self.pack_upload_failed { "Примени пак повторно в настройках комнаты." }
+                    else { "Нужны минимум два игрока. Все гости должны нажать «Готов»." });
             } else if button.clicked() {
                 if host { self.send(json!({"type":"start"})); }
                 else { self.send(json!({"type":"set_ready","ready":!ready})); }
@@ -1157,6 +1143,109 @@ impl BunkerApp {
             if ui.button("В главное меню").clicked() { self.leave_room(); }
         });
     }
+    fn room_creation(&mut self, ui: &mut egui::Ui, width: f32, list_height: f32) {
+        ui.set_width(width);
+        let gap = ui.spacing().item_spacing.x;
+        let column_width = (width - gap) / 2.0;
+        let mut changed = false;
+        let mut picked = None;
+        let mut reload = false;
+        let mut create = false;
+        let mut list_rect = egui::Rect::NOTHING;
+        ui.columns(2, |cols| {
+            let left = &mut cols[0];
+            left.heading("Паки");
+            let frame = egui::Frame::new()
+                .stroke(Stroke::new(1.0_f32, self.theme.palette.button.color()))
+                .inner_margin(10)
+                .show(left, |ui| {
+                    let dragging = ui.input(|input| !input.raw.hovered_files.is_empty());
+                    if dragging {
+                        ui.label("Отпусти JSON или ZIP здесь");
+                    }
+                    egui::ScrollArea::vertical()
+                        .id_salt("create-packs")
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                        .auto_shrink([false, false])
+                        .max_height(if dragging { (list_height - 28.0).max(60.0) } else { list_height })
+                        .show(ui, |ui| {
+                            for entry in &mut self.room_packs {
+                                let status = if entry.error().is_some() { self.theme.palette.negative.color() }
+                                    else if entry.active() { self.theme.palette.positive.color() }
+                                    else { self.theme.palette.button.color() };
+                                let title = FontWeight::Medium.text(self.theme.fonts.body, entry.name());
+                                let width = ui.available_width();
+                                let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 38.0), egui::Sense::hover());
+                                let strip = egui::Rect::from_min_size(rect.min, egui::vec2(5.0, rect.height()));
+                                ui.painter().rect_filled(strip, 0u8, status);
+                                let button_rect = egui::Rect::from_min_max(rect.min + egui::vec2(8.0, 0.0), rect.max);
+                                let response = ui.place(button_rect, egui::Button::new(title).truncate()
+                                    .fill(self.theme.palette.input.color()).corner_radius(0u8).min_size(button_rect.size()));
+                                if response.on_hover_text(entry.error().unwrap_or(entry.name())).clicked() {
+                                    entry.toggle();
+                                    changed = true;
+                                }
+                            }
+                        });
+                });
+            list_rect = frame.response.rect;
+            left.horizontal(|ui| {
+                if ui.add_sized([(column_width - gap - 40.0).max(80.0), 38.0], egui::Button::new("Добавить пак")).clicked() {
+                    picked = rfd::FileDialog::new().add_filter("Паки Murr", &["json", "zip"]).pick_files();
+                }
+                if ui.add_sized([40.0, 38.0], egui::Button::new("↻")).on_hover_text("Обновить паки с диска").clicked() {
+                    reload = true;
+                }
+            });
+
+            let right = &mut cols[1];
+            right.heading("События");
+            right.label("Шанс события");
+            right.add(egui::Slider::new(&mut self.event_chance, 0..=100).suffix("%"));
+            right.label(RichText::new("Шанс сохраняется в комнате. Игровые события пока не запускаются.")
+                .color(self.theme.palette.muted.color()).size(self.theme.fonts.small));
+            let remaining = (list_rect.bottom() - right.next_widget_position().y).max(0.0);
+            right.add_space(remaining);
+            right.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let available = self.room_packs.iter().any(crate::packs::Entry::active) && self.pending.is_none();
+                create = ui.add_enabled(available, self.theme.accent_button("Создать комнату")).clicked();
+            });
+        });
+
+        let mut files = picked.unwrap_or_default();
+        // Native Windows file-drop events don't carry coordinates.
+        ui.input_mut(|input| {
+            files.extend(std::mem::take(&mut input.raw.dropped_files).into_iter().filter_map(|file| file.path));
+        });
+        for path in files {
+            match crate::packs::add(&mut self.room_packs, &path) {
+                Ok(()) => changed = true,
+                Err(error) => self.notify(format!("{}: {error}", path.display())),
+            }
+        }
+        if changed {
+            if let Err(error) = crate::packs::save_library(&self.room_packs) {
+                self.notify(format!("Не удалось сохранить список паков: {error}"));
+            }
+        }
+        if reload {
+            for entry in &mut self.room_packs { entry.reload(); }
+            let errors = self.room_packs.iter().filter(|entry| entry.error().is_some()).count();
+            self.notify(if errors == 0 { "Паки обновлены".into() } else { format!("Паки обновлены. Ошибок: {errors}") });
+        }
+        if create {
+            match crate::packs::selected_payload(&self.room_packs) {
+                Ok((json, zip)) => {
+                    self.pack_json = json;
+                    self.pack_zip = zip;
+                    self.show_create = false;
+                    self.start_request(None);
+                }
+                Err(error) => self.notify(error),
+            }
+        }
+    }
+
     fn ui_overlays(&mut self, ctx: &egui::Context) {
         if self.show_avatar_picker {
             let modal = egui::Modal::new(egui::Id::new("choose-avatar"))
@@ -1214,25 +1303,16 @@ impl BunkerApp {
             if modal.should_close() { self.show_join = false; }
         }
         if self.show_create {
+            let screen = ctx.content_rect().size();
+            let width = (self.layout.dialog_width * 1.85).min(screen.x - 64.0);
+            let list_height = (screen.y * 0.60).clamp(180.0, 460.0);
             let mut open = true;
-            egui::Window::new("Создать игру").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open)
-                .min_width(self.layout.dialog_width).default_width(self.layout.dialog_width).show(ctx, |ui| {
-                ui.vertical_centered(|ui| {
-                    ui.label(FontWeight::Bold.text(self.theme.fonts.body, "Набор карт"));
-                    ui.label(if self.pack_file.is_empty() { "Бункер 6" } else { &self.pack_file });
-                    if ui.button("Выбрать JSON / ZIP-пак…").clicked() { self.pick_pack(); }
-                    ui.label(RichText::new("ZIP: pack.json и изображения в assets/. Раздаётся остальным автоматически.").color(self.theme.palette.muted.color()).size(self.theme.fonts.small));
-                    ui.separator();
-                    ui.label(FontWeight::Bold.text(self.theme.fonts.body, "События"));
-                    ui.add(egui::Slider::new(&mut self.event_chance, 0..=100).text("Шанс появления, %"));
-                    ui.label(RichText::new("WIP: параметр сохраняется в комнате, сами события пока не запускаются.").color(self.theme.palette.muted.color()));
-                    ui.add_space(12.0);
-                    if ui.add(self.theme.accent_button("Создать комнату")).clicked() {
-                        self.show_create = false;
-                        self.start_request(None);
-                    }
-                });
-            });
+            egui::Window::new("Создать игру").anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .movable(false).resizable(false).collapsible(false).open(&mut open)
+                .default_width(width).min_width(width).max_width(width)
+                .frame(egui::Frame::new().fill(self.theme.palette.background.color())
+                    .stroke(Stroke::new(1.0_f32, self.theme.palette.button.color())).inner_margin(18))
+                .show(ctx, |ui| self.room_creation(ui, width, list_height));
             self.show_create &= open;
         }
         if self.show_settings {
