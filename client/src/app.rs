@@ -274,7 +274,7 @@ impl BunkerApp {
     fn load_texture_from_zip(&mut self, ctx: &egui::Context, bytes: &[u8], name: &str) -> Result<(), String> {
         let cursor = Cursor::new(bytes);
         let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;
-        let mut image_file = archive.by_name(name).map_err(|e| e.to_string())?;
+        let image_file = archive.by_name(name).map_err(|e| e.to_string())?;
         if image_file.size() > 6_000_000 { return Err("Изображение слишком большое".into()); }
         let mut buffer = Vec::new();
         image_file.take(6_000_001).read_to_end(&mut buffer).map_err(|e| e.to_string())?;
@@ -385,7 +385,7 @@ impl BunkerApp {
         let label = RichText::new(avatar_symbol(avatar)).size(size * 0.45).color(Color32::WHITE);
         ui.add(egui::Button::new(label)
             .fill(avatar_color(avatar).gamma_multiply(if selected { 0.85 } else { 0.5 }))
-            .stroke(if selected { Stroke::new(2.0, GOLD) } else { Stroke::new(1.0, SUBTLE) })
+            .stroke(if selected { Stroke::new(2.0_f32, GOLD) } else { Stroke::new(1.0_f32, SUBTLE) })
             .min_size(egui::vec2(size, size)))
     }
     fn top_bar(&mut self, ctx: &egui::Context) {
@@ -524,7 +524,7 @@ impl BunkerApp {
                 egui::pos2(0.0,0.0),egui::pos2(1.0,1.0)), Color32::from_white_alpha(185));
         }
         painter.rect_filled(rect, 8.0, Color32::from_black_alpha(125));
-        painter.rect_stroke(rect, 8.0, Stroke::new(1.0, Color32::from_rgb(90,66,43)), egui::StrokeKind::Outside);
+        painter.rect_stroke(rect, 8.0, Stroke::new(1.0_f32, Color32::from_rgb(90,66,43)), egui::StrokeKind::Outside);
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(44.0,25.0))), |ui| {
             ui.add_space(45.0);
             ui.vertical_centered(|ui| {
@@ -899,9 +899,9 @@ impl eframe::App for BunkerApp {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&self.status).color(MUTED).size(12.0));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some(room) = &self.room {
+                        if let Some(room) = self.room.as_ref().map(|r| (r.code.clone(), r.round)) {
                             if ui.small_button("В меню").clicked() { self.leave_room(); }
-                            ui.label(RichText::new(format!("{} · Раунд {}", room.code, room.round)).color(MUTED));
+                            ui.label(RichText::new(format!("{} · Раунд {}", room.0, room.1)).color(MUTED));
                         }
                     });
                 });
