@@ -48,6 +48,10 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item client/target/release/murr-bunker-game.exe dist/Murr-Bunker.exe
           Copy-Item client/packs/demo.json dist/pack-example.json
+          # Copy any custom avatar artwork with the EXE; no user-specific images in source by default.
+          if (Test-Path client/assets/avatars) {
+            Copy-Item client/assets/avatars dist/avatars -Recurse -Force
+          }
           (Get-FileHash dist/Murr-Bunker.exe -Algorithm SHA256).Hash | Out-File -Encoding ascii dist/Murr-Bunker.exe.sha256.txt
           Compress-Archive -Path dist/* -DestinationPath Murr-Bunker-Windows-x64.zip -Force
 

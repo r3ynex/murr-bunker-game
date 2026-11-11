@@ -17,9 +17,11 @@
 
 **Manrope:** Windows-клиент использует Manrope, если рядом с EXE лежит твой `Manrope.zip` (с `static/Manrope-Regular.ttf`) или шрифт установлен в системе; иначе переключается на стандартный. Веб-тестер загружает Manrope через Google Fonts.
 
+**Свои аватарки:** помести `01.png`–`12.png` в папку `avatars` рядом с EXE. Поддерживаются PNG/JPG/WebP. Пошаговая инструкция: **[client/assets/avatars/README.md](client/assets/avatars/README.md)**. В репозитории эти же картинки можно добавить в `client/assets/avatars/` — Windows Actions включит их в релиз.
+
 ## Быстрый старт
 
-1. В папке `server`: `npm install`, затем `npm run dev`. Wrangler запускает локальный API (обычно `http://127.0.0.1:8787`).
+1. Готовый клиент по умолчанию подключается к `https://murr-bunker-api.r3ynex-error.workers.dev`. Локально можно запустить `cd server && npm install && npm run dev` и выбрать `http://127.0.0.1:8787` в настройках. Старое значение `127.0.0.1` из конфигурации автоматически мигрирует на Cloudflare.
 2. В папке `client`: `cargo run`. Либо скачай успешный Artifact сборки из **Actions → Build portable Windows client**.
 3. Запусти два экземпляра клиента. Первый создаёт комнату, второй вводит восьмизначный код. Для проверки требуется **два игрока**.
 4. Для интернета: `cd server && npx wrangler login && npm run deploy`; полученный адрес Worker укажи в клиенте и сохрани настройки.
