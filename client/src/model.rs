@@ -47,6 +47,12 @@ pub struct Player {
     pub cards: Vec<Card>,
 }
 
+impl Player {
+    pub fn revealed_card(&self, kind: &str) -> Option<&Card> {
+        self.cards.iter().find(|card| card.kind == kind && card.revealed)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Card {
     pub kind: String,
