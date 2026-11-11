@@ -46,7 +46,8 @@ function inspectZip(bytes) {
     }
     const name = td.decode(bytes.subarray(offset + 46, offset + 46 + nameLength));
     const allowed = name === "pack.json" ||
-      /^assets\/[a-zA-Z0-9_./-]+\.(png|jpg|jpeg|webp)$/i.test(name);
+      /^assets\/[a-zA-Z0-9_./-]+\.(png|jpg|jpeg|webp)$/i.test(name) ||
+      /^assets\/(?:[a-zA-Z0-9_-]+\/)*$/.test(name);
     if (!allowed || name.includes("..") || name.includes("//") ||
         name.startsWith("/") || names.has(name)) {
       throw Error("ZIP: разрешены только pack.json и изображения assets/*.png|jpg|webp");
@@ -73,7 +74,7 @@ export function readBundle(input) {
   const images = [];
   for (const [name, value] of Object.entries(extracted)) {
     if (!names.has(name)) throw Error("Неподдерживаемый файл в ZIP");
-    if (name !== "pack.json") {
+    if (name !== "pack.json" && !name.endsWith("/")) {
       const png = name.toLowerCase().endsWith(".png");
       const jpg = /\.jpe?g$/i.test(name);
       const webp = name.toLowerCase().endsWith(".webp");
