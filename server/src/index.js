@@ -148,9 +148,20 @@ export class Room extends DurableObject {
       const data = JSON.parse(message);
       if (!data || typeof data !== "object") throw Error("Некорректная команда");
       const host = me.id === state.hostId;
-      const hostOnly = ["start", "start_vote", "finish_vote", "next_round", "set_active", "set_seats", "set_pack", "finish"];
+      const hostOnly = ["start", "start_vote", "finish_vote", "next_round", "set_active", "set_seats", "set_pack", "gm_set_card", "finish"];
       if (hostOnly.includes(data.type) && !host) throw Error("Только ведущий может выполнить действие");
-      if (data.type === "set_ready") {
+      if (data.type === "leave") {
+        if (state.stage !== "lobby") throw Error("После старта выход не удаляет персонажа; обратитесь к ведущему");
+        state.players = state.players.filter(p => p.id !== me.id);
+        this.note(state, me.name + " покинул комнату");
+        if (state.hostId === me.id && state.players.length) state.hostId = state.players[0].id;
+        state.seats = Math.max(1, Math.min(state.seats, state.players.length));
+        if (!state.players.length) await this.ctx.storage.delete("room");
+        else await this.ctx.storage.put("room", state);
+        ws.close(1000, "left");
+        if (state.players.length) await this.broadcast(state);
+        return;
+      } else if (data.type === "set_ready") {
         if (state.stage !== "lobby") throw Error("Готовность меняется только в лобби");
         if (me.id === state.hostId) throw Error("Владелец запускает игру отдельной кнопкой");
         if (typeof data.ready !== "boolean") throw Error("Некорректное значение готовности");
@@ -210,6 +221,17 @@ export class Room extends DurableObject {
           name: state.players.find(p => p.id === id)?.name || "?", votes: count
         })).sort((a, b) => b.votes - a.votes);
         this.note(state, "Голосование завершено — исключение вручную ведущим");
+      } else if (data.type === "gm_set_card") {
+        if (state.stage !== "playing") throw Error("Изменение характеристик возможно только в игре");
+        const target = state.players.find(p => p.id === data.playerId);
+        if (!target) throw Error("Игрок не найден");
+        if (typeof data.kind !== "string" || typeof data.value !== "string" ||
+            !data.value.trim() || data.value.length > 6000) throw Error("Некорректная характеристика");
+        const card = target.cards.find(c => c.kind === data.kind);
+        if (!card) throw Error("Категория не найдена у игрока");
+        card.value = data.value.trim();
+        if (typeof data.revealed === "boolean") card.revealed = data.revealed;
+        this.note(state, "Ведущий изменил «" + data.kind + "» игрока " + target.name);
       } else if (data.type === "set_active") {
         const player = state.players.find(p => p.id === data.playerId);
         if (!player || state.stage !== "playing") throw Error("Игрок не найден");
@@ -237,6 +259,7 @@ export class Room extends DurableObject {
     }
   }
   async webSocketClose(ws) {
-    await this.broadcast(await this.ctx.storage.get("room"));
+    const state = await this.ctx.storage.get("room");
+    if (state) await this.broadcast(state);
   }
 }
