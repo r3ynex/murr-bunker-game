@@ -2,7 +2,7 @@ name: Check Cloudflare server
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/pdf-ui-lobby-ready-20261111]
     paths:
       - "server/**"
       - "web/**"
