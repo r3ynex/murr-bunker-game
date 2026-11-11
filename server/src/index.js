@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { DEFAULT_PACK, normalizePack, drawCard, drawScenario } from "./content.js";
 import { readBundle, sha256Hex, MAX_ZIP_BYTES } from "./bundle.js";
+import { unzipSync } from "fflate";
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), {
   status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }
@@ -35,7 +36,7 @@ export default {
         }
         return json({ error: "Не удалось создать комнату" }, 503);
       }
-      const match = url.pathname.match(/^\/api\/rooms\/([A-Z2-9]{8})\/(join|ws|bundle)$/);
+      const match = url.pathname.match(/^\/api\/rooms\/([A-Z2-9]{8})\/(join|ws|bundle|background)$/);
       if (!match) return json({ error: "Not found" }, 404);
       const [, code, action] = match;
       const room = env.ROOMS.getByName(code);
@@ -45,6 +46,9 @@ export default {
         return room.fetch("https://room.internal/join", {
           method: "POST", body: JSON.stringify({ name, avatar: avatarFrom(body.avatar) })
         });
+      }
+      if (action === "background" && request.method === "GET") {
+        return room.fetch(new Request("https://room.internal/background", request));
       }
       if (action === "bundle" && ["GET", "POST"].includes(request.method)) {
         return room.fetch(new Request("https://room.internal/bundle", request));
@@ -93,6 +97,22 @@ export class Room extends DurableObject {
       await this.ctx.storage.put("room", state);
       await this.broadcast(state);
       return json({ code: state.code, playerId: player.id, token: player.token });
+    }
+    if (url.pathname === "/background" && request.method === "GET") {
+      const token = (request.headers.get("authorization") || "").replace(/^Bearer /, "");
+      if (!state.players.some(p => p.token === token)) return json({ error: "Неверный токен" }, 401);
+      if (!state.bundle?.background) return json({ error: "Фон не выбран" }, 404);
+      const zip = await this.ctx.storage.get("bundle-data");
+      if (!(zip instanceof Uint8Array)) return json({ error: "ZIP не найден" }, 404);
+      const files = unzipSync(zip);
+      const path = state.bundle.background;
+      const data = files[path];
+      if (!data) return json({ error: "Фон не найден" }, 404);
+      const mime = path.toLowerCase().endsWith(".png") ? "image/png"
+        : path.toLowerCase().endsWith(".webp") ? "image/webp" : "image/jpeg";
+      return new Response(data, {
+        headers: { "content-type": mime, "cache-control": "private, no-store" }
+      });
     }
     if (url.pathname === "/bundle") {
       const header = request.headers.get("authorization") || "";
