@@ -24,6 +24,15 @@
       <p class="muted">Работает прямо в браузере телефона. Комнаты — на Cloudflare, голос — в Discord.</p>
       <label for="nickname">Твой ник</label>
       <input id="nickname" type="text" maxlength="24" minlength="2" autocomplete="nickname" value="Игрок">
+      <label for="avatarChoice">Аватар (временные значки 1–12)</label>
+      <select id="avatarChoice">
+        <option value="1">01 · ✦</option><option value="2">02 · ◆</option>
+        <option value="3">03 · ☼</option><option value="4">04 · ✿</option>
+        <option value="5">05 · ★</option><option value="6">06 · ♣</option>
+        <option value="7">07 · ◇</option><option value="8">08 · ◈</option>
+        <option value="9">09 · ✧</option><option value="10">10 · ●</option>
+        <option value="11">11 · ☻</option><option value="12">12 · ♟</option>
+      </select>
       <button id="create" class="primary">Создать комнату</button>
       <div class="divider-text">или войти в существующую</div>
       <label for="joinCode">Код комнаты</label>
