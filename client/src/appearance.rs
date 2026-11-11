@@ -224,7 +224,7 @@ impl Layout {
         range(self.entry_button_size, 32.0, 100.0)?;
         range(self.section_min_height, 240.0, 1000.0)?;
         range(self.hero_height, 240.0, 1000.0)?;
-        range(self.hero_top_gap, 0.0, 240.0)?;
+        range(self.hero_top_gap, 0.0, 350.0)?;
         range(self.welcome_name_width, 80.0, 480.0)?;
         range(self.dialog_width, 240.0, 700.0)?;
         range(self.lobby_avatar_size, 24.0, 88.0)?;

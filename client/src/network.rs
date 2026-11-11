@@ -94,10 +94,10 @@ pub fn upload_bundle(base_url: String, session: Session, bytes: Vec<u8>) -> Rece
     rx
 }
 
-pub fn download_bundle(base_url: String, session: Session) -> Receiver<Result<Vec<u8>, String>> {
+pub fn download_background(base_url: String, session: Session) -> Receiver<Result<Vec<u8>, String>> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let url = format!("{}/api/rooms/{}/bundle", base_url.trim().trim_end_matches('/'), session.code);
+        let url = format!("{}/api/rooms/{}/background", base_url.trim().trim_end_matches('/'), session.code);
         let response = ureq::AgentBuilder::new().timeout(Duration::from_secs(25)).build()
             .get(&url)
             .set("authorization", &format!("Bearer {}", session.token))
@@ -105,16 +105,16 @@ pub fn download_bundle(base_url: String, session: Session) -> Receiver<Result<Ve
         let result = match response {
             Ok(r) => {
                 let mut bytes = Vec::new();
-                r.into_reader().take(2_000_001).read_to_end(&mut bytes)
+                r.into_reader().take(6_000_001).read_to_end(&mut bytes)
                     .map_err(|e| e.to_string()).and_then(|_| {
-                        if bytes.len() > 2_000_000 {
-                            Err("Слишком большой ZIP-пак".to_owned())
+                        if bytes.len() > 6_000_000 {
+                            Err("Изображение больше 6 МБ".to_owned())
                         } else {
                             Ok(bytes)
                         }
                     })
             }
-            Err(ureq::Error::Status(code, _)) => Err(format!("Архив недоступен: HTTP {code}")),
+            Err(ureq::Error::Status(code, _)) => Err(format!("Фон недоступен: HTTP {code}")),
             Err(e) => Err(e.to_string())
         };
         let _ = tx.send(result);

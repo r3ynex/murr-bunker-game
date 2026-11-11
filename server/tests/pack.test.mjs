@@ -35,10 +35,9 @@ test("single JSON v2 has meaningful sections", () => {
   assert.ok(example.items.backpack);
   assert.ok(example.world.catastrophes);
   assert.ok(example.world.bunker);
-  assert.ok(example.customCategories.talent);
   const pack = normalizePack(example);
   assert.equal(pack.name, "Murr: Первое убежище");
-  assert.equal(pack.categoryLabels.talent, "Скрытый талант");
+  assert.ok(!pack.categoryOrder.includes("talent"));
   assert.equal(pack.bunker.location.length, 2);
   assert.equal(pack.categories.profession[0].stage, "Опытный");
   assert.equal(pack.categories.equipment[1].weight, 3);

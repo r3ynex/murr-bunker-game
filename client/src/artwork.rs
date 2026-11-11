@@ -138,7 +138,7 @@ fn load_icon(ctx: &egui::Context, name: &str, path: &Path) -> Option<egui::Textu
     texture(ctx, name, &bytes, 512)
 }
 
-fn texture(
+pub fn texture(
     ctx: &egui::Context,
     name: &str,
     data: &[u8],

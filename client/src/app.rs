@@ -81,20 +81,42 @@ fn section_rule(ui: &mut egui::Ui, theme: &Theme) {
     ui.painter().rect_filled(line, 0u8, theme.palette.outline.color());
     ui.add_space(theme.spacing.section_gap);
 }
+fn scroll_to_section(ui: &egui::Ui, top: f32) {
+    // Use a finite marker at the top of the section instead of the remaining cursor rectangle.
+    let marker = egui::Rect::from_min_size(egui::pos2(ui.min_rect().left(), top), egui::vec2(1.0, 1.0));
+    ui.scroll_to_rect_animation(
+        marker,
+        Some(egui::Align::Min),
+        egui::style::ScrollAnimation::new(2800.0, egui::Rangef::new(0.25, 0.65)),
+    );
+}
+
 fn bunker_description(ui: &mut egui::Ui, text: &str, theme: &Theme) {
-    let size = theme.fonts.bunker_body;
+    let regular = egui::TextFormat::simple(FontWeight::Regular.font(theme.fonts.bunker_body), theme.palette.text.color());
+    let accent = egui::TextFormat::simple(FontWeight::SemiBold.font(theme.fonts.bunker_body), theme.palette.accent_title.color());
+    let mut stats_started = false;
     for line in text.lines() {
         let mut job = egui::text::LayoutJob::default();
-        let (label, value) = line.split_once(':').filter(|(label, _)| {
-            matches!(*label, "Размер" | "Время проживания" | "Еда и вода" | "Внутри"
-                | "Размер бункера" | "Время нахождения" | "Количество еды и воды" | "В бункере присутствует")
-        }).map_or((None, line), |(label, value)| (Some(label), value));
-        if let Some(label) = label {
-            job.append(&format!("{label}:"), 0.0, egui::TextFormat::simple(
-                FontWeight::SemiBold.font(size), theme.palette.accent_title.color(),
-            ));
+        let (label, value) = line.split_once(':').unwrap_or(("", line));
+        let display = match label {
+            "Внутри" | "В бункере присутствует" => Some(("В бункере присутствует", "\n")),
+            "Размер" | "Размер бункера" => Some(("Размер бункера", " ")),
+            "Время проживания" | "Время нахождения" => Some(("Время нахождения", " ")),
+            "Еда и вода" | "Количество еды и воды" => Some(("Количество еды и воды", " ")),
+            _ => None,
+        };
+        if let Some((title, separator)) = display {
+            if !stats_started {
+                ui.add_space(theme.spacing.heading_gap);
+                stats_started = true;
+            }
+            job.append(title, 0.0, accent.clone());
+            job.append(":", 0.0, accent.clone());
+            job.append(separator, 0.0, regular.clone());
+            job.append(value.trim_start(), 0.0, regular.clone());
+        } else {
+            job.append(if label == "Описание" { value.trim_start() } else { line }, 0.0, regular.clone());
         }
-        job.append(value, 0.0, egui::TextFormat::simple(FontWeight::Regular.font(size), theme.palette.text.color()));
         ui.add(egui::Label::new(job).wrap());
     }
 }
@@ -148,8 +170,7 @@ pub struct BunkerApp {
     pack_zip: Option<Vec<u8>>,
     upload_pending: Option<Receiver<Result<String, String>>>,
     download_pending: Option<Receiver<Result<Vec<u8>, String>>>,
-    downloading_sha: Option<String>,
-    loaded_sha: Option<String>,
+    background_sha: Option<String>,
     hero_texture: Option<egui::TextureHandle>,
 }
 
@@ -189,8 +210,8 @@ impl BunkerApp {
             dice_sides: 6, event_chance: 0,
             pack_json: include_str!("../packs/demo.json").to_owned(),
             pack_file: String::new(), pack_zip: None,
-            upload_pending: None, download_pending: None, downloading_sha: None,
-            loaded_sha: None, hero_texture: None,
+            upload_pending: None, download_pending: None, background_sha: None,
+            hero_texture: None,
         }
     }
     fn reload_appearance(&mut self, ctx: &egui::Context) {
@@ -286,9 +307,7 @@ impl BunkerApp {
         self.online = false;
         self.session = None;
         self.room = None;
-        self.loaded_sha = None;
-        self.downloading_sha = None;
-        self.hero_texture = None;
+        self.clear_background();
         self.create_on_connect = join.is_none();
         self.notify("Подключаемся к комнате…");
         self.pending = Some(network::request_room(
@@ -368,23 +387,44 @@ impl BunkerApp {
             self.load_pack_path(&path);
         }
     }
-    fn load_texture_from_zip(&mut self, ctx: &egui::Context, bytes: &[u8], name: &str) -> Result<(), String> {
-        let cursor = Cursor::new(bytes);
-        let mut archive = zip::ZipArchive::new(cursor).map_err(|e| e.to_string())?;
-        let image_file = archive.by_name(name).map_err(|e| e.to_string())?;
-        if image_file.size() > 6_000_000 { return Err("Изображение слишком большое".into()); }
-        let mut buffer = Vec::new();
-        image_file.take(6_000_001).read_to_end(&mut buffer).map_err(|e| e.to_string())?;
-        if buffer.len() > 6_000_000 { return Err("Изображение слишком большое".into()); }
-        let rgba = image::load_from_memory(&buffer).map_err(|e| e.to_string())?.to_rgba8();
-        let (w,h) = rgba.dimensions();
-        if w > 4096 || h > 4096 { return Err("Фон больше 4096 × 4096".into()); }
-        let colors = egui::ColorImage::from_rgba_unmultiplied(
-            [w as usize, h as usize], rgba.as_raw()
-        );
-        self.hero_texture = Some(ctx.load_texture("murr-room-background", colors, egui::TextureOptions::LINEAR));
-        Ok(())
+    fn clear_background(&mut self) {
+        self.background_sha = None;
+        self.download_pending = None;
+        self.hero_texture = None;
     }
+
+    fn sync_background(&mut self, ctx: &egui::Context) {
+        let desired = self.room.as_ref()
+            .and_then(|room| room.bundle.as_ref())
+            .filter(|bundle| bundle.background.is_some())
+            .zip(self.session.as_ref());
+
+        let Some((bundle, session)) = desired else {
+            self.clear_background();
+            return;
+        };
+        if self.background_sha.as_deref() != Some(&bundle.sha256) {
+            self.background_sha = Some(bundle.sha256.clone());
+            self.hero_texture = None;
+            self.download_pending = Some(network::download_background(
+                self.server_url.clone(), session.clone(),
+            ));
+        }
+
+        if let Some(reply) = self.download_pending.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.download_pending = None;
+            match reply {
+                Ok(bytes) => {
+                    self.hero_texture = crate::artwork::texture(ctx, "murr-room-background", &bytes, 4096);
+                    if self.hero_texture.is_none() {
+                        self.notify("Фон пака повреждён или больше 4096 × 4096");
+                    }
+                }
+                Err(e) => self.notify(format!("Фон пака не загрузился: {e}")),
+            }
+        }
+    }
+
     fn poll_network(&mut self, ctx: &egui::Context) {
         if let Some(reply) = self.pending.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.pending = None;
@@ -398,23 +438,6 @@ impl BunkerApp {
             match reply {
                 Ok(name) => self.notify(format!("ZIP-пак «{name}» передан всем участникам")),
                 Err(e) => self.notify(format!("Ошибка ZIP-пака: {e}")),
-            }
-        }
-        if let Some(reply) = self.download_pending.as_ref().and_then(|rx| rx.try_recv().ok()) {
-            self.download_pending = None;
-            let hash = self.downloading_sha.take().unwrap_or_default();
-            self.loaded_sha = Some(hash);
-            match reply {
-                Ok(bytes) => {
-                    let background = self.room.as_ref().and_then(|r| r.bundle.as_ref())
-                        .and_then(|b| b.background.clone());
-                    if let Some(name) = background {
-                        if let Err(e) = self.load_texture_from_zip(ctx, &bytes, &name) {
-                            self.notify(format!("Фон пака не загрузился: {e}"));
-                        }
-                    }
-                }
-                Err(e) => self.notify(format!("Не удалось получить медиа пака: {e}")),
             }
         }
         let events: Vec<WsEvent> = self.receiver.as_ref()
@@ -457,21 +480,7 @@ impl BunkerApp {
                 _ => {}
             }
         }
-        if let Some(room) = &self.room {
-            if let (Some(bundle), Some(session)) = (&room.bundle, &self.session) {
-                if self.loaded_sha.as_deref() != Some(&bundle.sha256)
-                    && self.downloading_sha.as_deref() != Some(&bundle.sha256)
-                    && self.download_pending.is_none() {
-                    self.downloading_sha = Some(bundle.sha256.clone());
-                    self.download_pending = Some(network::download_bundle(
-                        self.server_url.clone(), session.clone()
-                    ));
-                }
-            } else {
-                self.loaded_sha = None;
-                self.hero_texture = None;
-            }
-        }
+        self.sync_background(ctx);
     }
     fn update_room(&mut self, room: Room) {
         let joined = self.room.as_ref()
@@ -491,6 +500,7 @@ impl BunkerApp {
         self.sender = None;
         self.receiver = None;
         self.room = None;
+        self.clear_background();
         self.session = None;
         self.online = false;
         self.notify("Вы вышли в главное меню");
@@ -670,20 +680,7 @@ impl BunkerApp {
         });
     }
 
-    fn at_section(&mut self, ui: &mut egui::Ui, index: usize) {
-        let viewport = ui.clip_rect();
-        if ui.cursor().top() <= viewport.top() + 0.25 * viewport.height() {
-            self.active_section = index;
-        }
-        if self.pending_section == Some(index) {
-            ui.scroll_to_rect(ui.cursor(), Some(egui::Align::Min));
-            self.active_section = index;
-            self.pending_section = None;
-        }
-    }
-
     fn hero(&mut self, ui: &mut egui::Ui, room: &Room) {
-        self.at_section(ui, 0);
         let width = ui.available_width();
         let height = self.layout.hero_height;
         let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
@@ -743,7 +740,6 @@ impl BunkerApp {
     }
 
     fn bunker_section(&mut self, ui: &mut egui::Ui, room: &Room) {
-        self.at_section(ui, 1);
         let width = ui.available_width();
         let height = self.layout.section_min_height;
         let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
@@ -754,14 +750,14 @@ impl BunkerApp {
         }
         let margin = (0.083 * width).max(f32::from(self.layout.panel_padding));
         let content = egui::Rect::from_min_size(
-            egui::pos2(rect.left() + margin, rect.top() + 0.21 * height),
-            egui::vec2((width * 0.64 - margin).max(100.0), height * 0.72),
+            egui::pos2(rect.left() + margin, rect.top() + 0.24 * height),
+            egui::vec2((width * 0.68 - margin).max(100.0), height * 0.72),
         );
         let mut body = ui.new_child(egui::UiBuilder::new().max_rect(content));
         body.set_clip_rect(rect.intersect(ui.clip_rect()));
         body.label(FontWeight::Bold.text(self.theme.fonts.heading, "Информация о бункере"));
         body.add_space(self.theme.spacing.heading_gap);
-        egui::ScrollArea::vertical().id_salt("bunker-description").max_height(height * 0.45).show(&mut body, |ui| {
+        egui::ScrollArea::vertical().id_salt("bunker-description").max_height(height * 0.51).show(&mut body, |ui| {
             bunker_description(ui, &room.bunker, &self.theme);
         });
         body.add_space(16.0);
@@ -769,7 +765,6 @@ impl BunkerApp {
     }
 
     fn event_section(&mut self, ui: &mut egui::Ui, room: &Room) {
-        self.at_section(ui, 2);
         let top = ui.cursor().top();
         ui.add_space(36.0);
         heading(ui, &self.theme, "События");
@@ -781,46 +776,67 @@ impl BunkerApp {
         ui.add_space((self.layout.section_min_height - (ui.cursor().top() - top)).max(0.0));
     }
     fn dossier_section(&mut self, ui: &mut egui::Ui, room: &Room) {
-        self.at_section(ui, 3);
         let Some(me) = room.players.iter().find(|p| p.id == room.you) else { return; };
-        let top = ui.cursor().top();
+        let top = ui.next_widget_position().y;
         ui.add_space(44.0);
         heading(ui, &self.theme, &format!("Досье игрока {}", me.name));
-        let (abilities, cards): (Vec<_>, Vec<_>) = me.cards.iter().partition(|card| matches!(card.kind.as_str(), "ability" | "ability2"));
+
+        // PhotoCraft reads down the left column, then down the right column.
+        const KINDS: [&str; 10] = [
+            "gender", "body", "personality", "profession", "health",
+            "hobby", "fear", "equipment", "backpack", "fact",
+        ];
+        const ABILITIES: [&str; 2] = ["ability", "ability2"];
         let columns = self.layout.dossier_columns;
-        let per_column = cards.len().div_ceil(columns);
-        let inset = ui.available_width() * 0.08;
-        egui::Frame::new().inner_margin(egui::Margin::symmetric(inset.min(127.0) as i8, 0)).show(ui, |ui| {
-            ui.columns(columns, |cols| {
-                for (index, card) in cards.into_iter().enumerate() {
-                    self.dossier_card(&mut cols[index / per_column], room, card, me.active);
-                }
+        let rows = KINDS.len().div_ceil(columns);
+        let inset = (ui.available_width() * 0.08).min(127.0) as i8;
+        egui::Frame::new().inner_margin(egui::Margin::symmetric(inset, 0)).show(ui, |ui| {
+            ui.visuals_mut().widgets.noninteractive.bg_stroke.color = self.theme.palette.surface.color();
+            for row in 0..rows {
+                ui.columns(columns, |cols| {
+                    for (column, ui) in cols.iter_mut().enumerate() {
+                        if let Some(card) = KINDS.get(column * rows + row)
+                            .and_then(|&kind| me.cards.iter().find(|card| card.kind == kind))
+                        {
+                            self.dossier_card(ui, room, card, me.active);
+                        }
+                    }
+                });
+                ui.separator();
+            }
+
+            let abilities = ABILITIES.iter().filter_map(|&kind| me.cards.iter().find(|card| card.kind == kind));
+            let extra = me.cards.iter().filter(|card| {
+                let kind = card.kind.as_str();
+                kind != "talent" && !KINDS.contains(&kind) && !ABILITIES.contains(&kind)
             });
             ui.add_space(8.0);
             ui.vertical_centered(|ui| {
-                let width = (ui.available_width() * 0.64).max(320.0);
+                let width = ui.available_width() * 0.64;
                 ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
                     ui.set_width(width);
-                    for card in abilities {
+                    for card in abilities.chain(extra) {
                         self.dossier_card(ui, room, card, me.active);
+                        ui.separator();
                     }
                 });
             });
         });
-        ui.add_space((self.layout.section_min_height - (ui.cursor().top() - top)).max(0.0));
+        let remaining = top + self.layout.section_min_height - ui.next_widget_position().y;
+        if remaining > 0.0 { ui.add_space(remaining); }
     }
 
     fn dossier_card(&mut self, ui: &mut egui::Ui, room: &Room, card: &Card, active: bool) {
         let [x, y] = self.layout.dossier_padding;
-        let palette = &self.theme.palette;
-        let text = palette.text.color();
-        let accent = palette.accent_title.color();
-        let line = palette.surface.color();
+        let text = self.theme.palette.text.color();
+        let accent = self.theme.palette.accent_title.color();
+        let size = self.theme.fonts.dossier;
         let name = room.category_labels.get(&card.kind).map(String::as_str).unwrap_or_else(|| category_name(&card.kind));
         egui::Frame::new().inner_margin(egui::Margin::symmetric(x, y)).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(FontWeight::Medium.text(self.theme.fonts.dossier, name).color(text));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.horizontal_top(|ui| {
+                let label_width = ui.available_width() * 0.42;
+                ui.add_sized([label_width, 0.0], egui::Label::new(FontWeight::Medium.text(size, name).color(text)).wrap());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                     let (icon, marker, tooltip) = if card.revealed {
                         (Icon::Unlocked, &self.theme.icons.unlocked, "Уже открыто")
                     } else {
@@ -831,12 +847,13 @@ impl BunkerApp {
                     if ui.add_enabled(active && !card.revealed, button).on_hover_text(tooltip).clicked() {
                         self.send(json!({"type":"reveal","kind":card.kind}));
                     }
-                    ui.add(egui::Label::new(FontWeight::SemiBold.text(self.theme.fonts.dossier, &card.value).color(accent)).wrap());
+                    let width = ui.available_width().max(0.0);
+                    ui.add_sized([width, 0.0],
+                        egui::Label::new(FontWeight::SemiBold.text(size, &card.value).color(accent)).wrap())
+                        .on_hover_text(&card.value);
                 });
             });
         });
-        let (rule, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
-        ui.painter().rect_filled(rule, 0u8, line);
     }
 
     fn edit_card(&mut self, player_id: &str, kind: &str, value: &str) {
@@ -845,7 +862,6 @@ impl BunkerApp {
     }
 
     fn overview_section(&mut self, ui: &mut egui::Ui, room: &Room) {
-        self.at_section(ui, 4);
         ui.add_space(30.0);
         let count = room.players.iter().filter(|p| p.active).count();
         let mut heading = egui::text::LayoutJob::default();
@@ -860,13 +876,14 @@ impl BunkerApp {
         ui.add_space(self.theme.spacing.heading_gap);
         let keys = ["gender", "body", "personality", "profession", "health", "hobby", "fear", "equipment", "backpack", "fact"];
         self.player_table(ui, room, "player-matrix", &keys, self.layout.players_cell_size);
+        ui.add_space(self.theme.spacing.heading_gap);
     }
 
     fn abilities_section(&mut self, ui: &mut egui::Ui, room: &Room) {
-        self.at_section(ui, 5);
         ui.add_space(30.0);
         heading(ui, &self.theme, "Таблица спец. возможностей");
         self.player_table(ui, room, "ability-matrix", &["ability", "ability2"], self.layout.abilities_cell_size);
+        ui.add_space(self.theme.spacing.heading_gap);
     }
 
     fn player_table(&mut self, ui: &mut egui::Ui, room: &Room, id: &str, keys: &[&str], cell: [f32; 2]) {
@@ -883,6 +900,11 @@ impl BunkerApp {
                     ui.add_sized([player_width, 36.0], egui::Label::new(FontWeight::SemiBold.text(self.theme.fonts.table_heading, "Игрок")));
                     for &kind in keys {
                         let name = room.category_labels.get(kind).map(String::as_str).unwrap_or_else(|| category_name(kind));
+                        let name = if kind == "fact" && name == "Дополнительное сведение" {
+                            "Дополнительное\nсведение"
+                        } else {
+                            name
+                        };
                         ui.add_sized([cell[0], 36.0], egui::Label::new(FontWeight::SemiBold.text(self.theme.fonts.table_heading, name)).wrap());
                     }
                     ui.end_row();
@@ -896,7 +918,7 @@ impl BunkerApp {
                             });
                         });
                         for &kind in keys {
-                            let card = player.cards.iter().find(|card| card.kind == kind);
+                            let card = player.revealed_card(kind);
                             table_cell(ui, cell, line, |ui| {
                                 if host {
                                     let icon = self.artwork.button(Icon::Edit, &self.theme.icons.edit, 13.0).frame(false);
@@ -922,19 +944,32 @@ impl BunkerApp {
 
     fn ui_game(&mut self, ui: &mut egui::Ui, room: &Room) {
         self.active_section = 0;
-        egui::ScrollArea::vertical().id_salt("entire-game").auto_shrink([false,false]).show(ui, |ui| {
-            self.hero(ui, room);
-            section_rule(ui, &self.theme);
-            self.bunker_section(ui, room);
-            section_rule(ui, &self.theme);
-            self.event_section(ui, room);
-            section_rule(ui, &self.theme);
-            self.dossier_section(ui, room);
-            section_rule(ui, &self.theme);
-            self.overview_section(ui, room);
-            section_rule(ui, &self.theme);
-            self.abilities_section(ui, room);
-            section_rule(ui, &self.theme);
+        let requested_section = self.pending_section.take();
+        egui::ScrollArea::vertical().id_salt(("entire-game", &room.code)).auto_shrink([false, false])
+            .show_viewport(ui, |ui, viewport| {
+            let sections = [
+                Self::hero,
+                Self::bunker_section,
+                Self::event_section,
+                Self::dossier_section,
+                Self::overview_section,
+                Self::abilities_section,
+            ];
+            let active_line = ui.clip_rect().top() + 0.25 * viewport.height();
+            let mut scroll_target = None;
+            let mut last_section_top = 0.0;
+            for (index, section) in sections.into_iter().enumerate() {
+                let top = ui.next_widget_position().y;
+                if top <= active_line {
+                    self.active_section = index;
+                }
+                if requested_section == Some(index) {
+                    scroll_target = Some(top);
+                }
+                last_section_top = top;
+                section(self, ui, room);
+                section_rule(ui, &self.theme);
+            }
             ui.horizontal_wrapped(|ui| {
                 if room.you == room.host_id {
                     if ui.add(self.theme.accent_button("Панель ведущего")).clicked() { self.show_host_tools = true; }
@@ -964,6 +999,12 @@ impl BunkerApp {
             ui.label(FontWeight::Bold.text(self.theme.fonts.button, "Журнал партии"));
             for event in room.log.iter().rev().take(8) {
                 ui.label(RichText::new(event).color(self.theme.palette.muted.color()));
+            }
+            // Allow the final section to reach the same top alignment as earlier sections.
+            let remaining = last_section_top + viewport.height() - ui.next_widget_position().y;
+            if remaining > 0.0 { ui.add_space(remaining); }
+            if let Some(top) = scroll_target {
+                scroll_to_section(ui, top);
             }
         });
     }
@@ -1192,5 +1233,46 @@ impl eframe::App for BunkerApp {
         if self.pending.is_some() || self.upload_pending.is_some() || self.download_pending.is_some() {
             ctx.request_repaint_after(Duration::from_millis(80));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn navigation_animates_to_the_section_and_back() {
+        let ctx = egui::Context::default();
+        let frame = |time, target| {
+            let mut offset = 0.0;
+            let input = egui::RawInput {
+                time: Some(time),
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(850.0, 600.0))),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    offset = egui::ScrollArea::vertical().id_salt("game-test").show(ui, |ui| {
+                        let start = ui.next_widget_position().y;
+                        ui.add_space(1000.0);
+                        let second = ui.next_widget_position().y;
+                        egui::ScrollArea::horizontal().show(ui, |ui| { ui.label("Table"); });
+                        ui.add_space(1000.0);
+                        if let Some(index) = target {
+                            scroll_to_section(ui, [start, second][index]);
+                        }
+                    }).state.offset.y;
+                });
+            });
+            offset
+        };
+        assert_eq!(frame(0.0, None), 0.0);
+        assert_eq!(frame(0.1, Some(1)), 0.0);
+        let moving = frame(0.26, None);
+        assert!(moving > 0.0 && moving < 950.0, "intermediate offset: {moving}");
+        let arrived = frame(0.9, None);
+        assert!((950.0..=1050.0).contains(&arrived), "section offset: {arrived}");
+        frame(1.0, Some(0));
+        assert_eq!(frame(1.8, None), 0.0);
     }
 }

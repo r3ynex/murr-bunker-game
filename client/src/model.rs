@@ -104,3 +104,23 @@ pub fn category_name(key: &str) -> &str {
         _ => key,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_tables_hide_own_unrevealed_cards() {
+        let player: Player = serde_json::from_value(serde_json::json!({
+            "id": "me", "name": "Player", "active": true,
+            "cards": [
+                {"kind": "profession", "value": "Architect", "revealed": false},
+                {"kind": "ability", "value": "Repair", "revealed": true},
+                {"kind": "ability2", "value": "Trade", "revealed": false}
+            ]
+        })).unwrap();
+        assert!(player.revealed_card("profession").is_none());
+        assert!(player.revealed_card("ability2").is_none());
+        assert_eq!(player.revealed_card("ability").unwrap().value, "Repair");
+    }
+}
