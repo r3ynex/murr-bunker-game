@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { DEFAULT_PACK, normalizePack, drawCard, drawScenario } from "./content.js";
+import { readBundle, sha256Hex, MAX_ZIP_BYTES } from "./bundle.js";
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), {
   status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }
@@ -7,6 +8,7 @@ const json = (data, status = 200) => new Response(JSON.stringify(data), {
 const codeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const randomCode = () => Array.from(crypto.getRandomValues(new Uint8Array(8)), b => codeAlphabet[b % codeAlphabet.length]).join("");
 const randomToken = () => crypto.randomUUID() + crypto.randomUUID();
+const avatarFrom = value => Number.isInteger(value) && value >= 1 && value <= 12 ? value : 1;
 const nameFrom = body => {
   const name = body?.name;
   if (typeof name !== "string" || name.trim().length < 2 || name.trim().length > 24) throw Error("Ник: от 2 до 24 символов");
@@ -19,27 +21,33 @@ export default {
     if (url.pathname === "/api/health") return json({ ok: true, version: 1 });
     try {
       if (url.pathname === "/api/rooms" && request.method === "POST") {
-        const name = nameFrom(await request.json());
+        const body = await request.json();
+        const name = nameFrom(body);
+        const avatar = avatarFrom(body.avatar);
         for (let i = 0; i < 3; i++) {
           const code = randomCode();
           const room = env.ROOMS.getByName(code);
           const result = await room.fetch("https://room.internal/init", {
-            method: "POST", body: JSON.stringify({ code, name })
+            method: "POST", body: JSON.stringify({ code, name, avatar })
           });
           if (result.status === 409) continue;
           return result;
         }
         return json({ error: "Не удалось создать комнату" }, 503);
       }
-      const match = url.pathname.match(/^\/api\/rooms\/([A-Z2-9]{8})\/(join|ws)$/);
+      const match = url.pathname.match(/^\/api\/rooms\/([A-Z2-9]{8})\/(join|ws|bundle)$/);
       if (!match) return json({ error: "Not found" }, 404);
       const [, code, action] = match;
       const room = env.ROOMS.getByName(code);
       if (action === "join" && request.method === "POST") {
-        const name = nameFrom(await request.json());
+        const body = await request.json();
+        const name = nameFrom(body);
         return room.fetch("https://room.internal/join", {
-          method: "POST", body: JSON.stringify({ name })
+          method: "POST", body: JSON.stringify({ name, avatar: avatarFrom(body.avatar) })
         });
+      }
+      if (action === "bundle" && ["GET", "POST"].includes(request.method)) {
+        return room.fetch(new Request("https://room.internal/bundle", request));
       }
       if (action === "ws" && request.method === "GET") {
         if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
@@ -61,12 +69,13 @@ export class Room extends DurableObject {
     const state = await this.ctx.storage.get("room");
     if (url.pathname === "/init" && request.method === "POST") {
       if (state) return json({ error: "Room exists" }, 409);
-      const { code, name } = await request.json();
-      const player = this.newPlayer(name);
+      const { code, name, avatar } = await request.json();
+      const player = this.newPlayer(name, avatar);
       const room = {
         code, hostId: player.id, stage: "lobby", round: 0, seats: 1,
         catastrophe: "", bunker: "", pack: DEFAULT_PACK, players: [player],
-        voteOpen: false, ballots: {}, voteResults: [], log: ["Комната создана"]
+        voteOpen: false, ballots: {}, voteResults: [], bundle: null,
+        eventChance: 0, log: ["Комната создана"]
       };
       await this.ctx.storage.put("room", room);
       return json({ code, playerId: player.id, token: player.token });
@@ -75,14 +84,53 @@ export class Room extends DurableObject {
     if (url.pathname === "/join" && request.method === "POST") {
       if (state.stage !== "lobby") return json({ error: "Партия уже запущена" }, 409);
       if (state.players.length >= 15) return json({ error: "Комната заполнена" }, 409);
-      const { name } = await request.json();
-      const player = this.newPlayer(name);
+      const { name, avatar } = await request.json();
+      const player = this.newPlayer(name, avatar);
+      player.ready = false;
       state.players.push(player);
       state.seats = Math.max(1, Math.floor(state.players.length / 2));
       this.note(state, name + " присоединился");
       await this.ctx.storage.put("room", state);
       await this.broadcast(state);
       return json({ code: state.code, playerId: player.id, token: player.token });
+    }
+    if (url.pathname === "/bundle") {
+      const header = request.headers.get("authorization") || "";
+      const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+      const me = state.players.find(p => p.token === token);
+      if (!me) return json({ error: "Неверный токен" }, 401);
+      if (request.method === "GET") {
+        if (!state.bundle) return json({ error: "ZIP-пак не загружен" }, 404);
+        const stored = await this.ctx.storage.get("bundle-data");
+        if (!(stored instanceof Uint8Array)) return json({ error: "Архив не найден" }, 404);
+        return new Response(stored, {
+          headers: {
+            "content-type": "application/zip",
+            "cache-control": "private, no-store",
+            "x-bundle-sha256": state.bundle.sha256
+          }
+        });
+      }
+      if (request.method === "POST") {
+        if (state.hostId !== me.id) return json({ error: "Загрузить ZIP может только ведущий" }, 403);
+        if (state.stage !== "lobby") return json({ error: "ZIP можно менять только до старта" }, 409);
+        if (Number(request.headers.get("content-length") || 0) > MAX_ZIP_BYTES) {
+          return json({ error: "ZIP должен быть меньше 2 МБ" }, 413);
+        }
+        const input = new Uint8Array(await request.arrayBuffer());
+        if (input.length > MAX_ZIP_BYTES) return json({ error: "ZIP должен быть меньше 2 МБ" }, 413);
+        const bundle = readBundle(input);
+        const hash = await sha256Hex(input);
+        // SQLite-backed DO KV supports the bounded Uint8Array directly.
+        await this.ctx.storage.put("bundle-data", input);
+        state.pack = bundle.pack;
+        state.bundle = { sha256: hash, bytes: input.length, background: bundle.background };
+        for (const p of state.players) p.ready = p.id === state.hostId;
+        this.note(state, "Выбран ZIP-пак: " + state.pack.name);
+        await this.ctx.storage.put("room", state);
+        await this.broadcast(state);
+        return json({ ok: true, bundle: state.bundle, packName: state.pack.name });
+      }
     }
     if (url.pathname === "/connect") {
       const token = url.searchParams.get("token");
@@ -99,8 +147,8 @@ export class Room extends DurableObject {
     return json({ error: "Not found" }, 404);
   }
 
-  newPlayer(name) {
-    return { id: crypto.randomUUID(), token: randomToken(), name, active: true, cards: [] };
+  newPlayer(name, avatar = 1) {
+    return { id: crypto.randomUUID(), token: randomToken(), name, avatar: avatarFrom(avatar), ready: true, active: true, cards: [] };
   }
   note(state, message) {
     state.log.push(message);
@@ -110,12 +158,14 @@ export class Room extends DurableObject {
     return {
       code: state.code, you: viewerId, hostId: state.hostId, stage: state.stage,
       round: state.round, seats: state.seats, catastrophe: state.catastrophe,
-      bunker: state.bunker, packName: state.pack.name,
-      categoryLabels: state.pack.categoryLabels, voteOpen: state.voteOpen,
+      bunker: state.bunker, packName: state.pack.name, bundle: state.bundle || null,
+      eventChance: state.eventChance ?? 0,
+      categoryLabels: { ...state.pack.categoryLabels, ability2: "Спец. возможность 2" }, voteOpen: state.voteOpen,
       ballotsCount: Object.keys(state.ballots).length, voteResults: state.voteResults,
       log: state.log, connected: this.ctx.getWebSockets().length,
       players: state.players.map(p => ({
-        id: p.id, name: p.name, active: p.active,
+        id: p.id, name: p.name, avatar: p.avatar || 1,
+        ready: p.ready ?? (p.id === state.hostId), active: p.active,
         cards: p.cards.filter(c => p.id === viewerId || c.revealed)
           .map(c => ({ kind: c.kind, value: c.value, revealed: c.revealed }))
       }))
@@ -142,12 +192,24 @@ export class Room extends DurableObject {
       const data = JSON.parse(message);
       if (!data || typeof data !== "object") throw Error("Некорректная команда");
       const host = me.id === state.hostId;
-      const hostOnly = ["start", "start_vote", "finish_vote", "next_round", "set_active", "set_seats", "set_pack", "finish"];
+      const hostOnly = ["start", "start_vote", "finish_vote", "next_round", "set_active", "set_seats", "set_pack", "finish", "set_event_chance", "host_edit_card", "host_redraw_card", "host_reveal_card"];
       if (hostOnly.includes(data.type) && !host) throw Error("Только ведущий может выполнить действие");
       if (data.type === "set_pack") {
         if (state.stage !== "lobby") throw Error("Менять пак можно только до старта");
         state.pack = normalizePack(data.pack);
+        state.bundle = null;
+        await this.ctx.storage.delete("bundle-data");
+        for (const p of state.players) p.ready = p.id === state.hostId;
         this.note(state, "Выбран пак: " + state.pack.name);
+      } else if (data.type === "set_ready") {
+        if (state.stage !== "lobby") throw Error("Готовность меняется в лобби");
+        me.ready = me.id === state.hostId ? true : Boolean(data.ready);
+        this.note(state, me.name + (me.ready ? " готов" : " не готов"));
+      } else if (data.type === "set_event_chance") {
+        if (state.stage !== "lobby") throw Error("Настройки меняются до старта");
+        const chance = Number(data.chance);
+        if (!Number.isInteger(chance) || chance < 0 || chance > 100) throw Error("Шанс от 0 до 100");
+        state.eventChance = chance;
       } else if (data.type === "set_seats") {
         if (state.stage !== "lobby") throw Error("Число мест меняется до старта");
         const seats = Number(data.seats);
@@ -156,6 +218,7 @@ export class Room extends DurableObject {
       } else if (data.type === "start") {
         if (state.stage !== "lobby") throw Error("Игра уже запущена");
         if (state.players.length < 2) throw Error("Нужно минимум два игрока (тестовый режим)");
+        if (state.players.some(p => p.id !== state.hostId && !p.ready)) throw Error("Все игроки должны нажать «Готов»");
         // Rooms created before v2 may still contain an old-style stored pack.
         if (!Array.isArray(state.pack.categoryOrder)) state.pack = normalizePack(state.pack);
         state.stage = "playing";
@@ -166,6 +229,9 @@ export class Room extends DurableObject {
         state.players.forEach(p => {
           p.active = true;
           p.cards = state.pack.categoryOrder.map(kind => drawCard(state.pack, kind));
+          if (state.pack.categories.ability?.length > 1) {
+            p.cards.push({ ...drawCard(state.pack, "ability"), kind: "ability2" });
+          }
         });
         this.note(state, "Игра началась");
       } else if (data.type === "reveal") {
@@ -175,6 +241,26 @@ export class Room extends DurableObject {
         if (card.revealed) throw Error("Карта уже открыта");
         card.revealed = true;
         this.note(state, me.name + " открыл(а): " + data.kind);
+      } else if (["host_edit_card", "host_redraw_card", "host_reveal_card"].includes(data.type)) {
+        if (state.stage !== "playing") throw Error("Игра ещё не началась");
+        const player = state.players.find(p => p.id === data.playerId);
+        const card = player?.cards.find(c => c.kind === data.kind);
+        if (!card) throw Error("Карта игрока не найдена");
+        if (data.type === "host_edit_card") {
+          if (typeof data.value !== "string" || !data.value.trim() || data.value.length > 2000) {
+            throw Error("Текст карты от 1 до 2000 символов");
+          }
+          card.value = data.value.trim();
+        } else if (data.type === "host_reveal_card") {
+          card.revealed = true;
+        } else {
+          const category = data.kind === "ability2" ? "ability" : data.kind;
+          if (!state.pack.categories[category]) throw Error("Категория не найдена");
+          const fresh = drawCard(state.pack, category);
+          card.value = fresh.value;
+          // Preserve visibility; never secretly hide a card that was already revealed.
+        }
+        this.note(state, "Ведущий изменил карточку игрока " + player.name);
       } else if (data.type === "roll") {
         if (state.stage !== "playing") throw Error("Броски доступны только во время игры");
         const sides = Number(data.sides);
@@ -211,6 +297,19 @@ export class Room extends DurableObject {
         } else {
           state.round += 1; state.voteResults = [];
           this.note(state, "Раунд " + state.round);
+        }
+      } else if (data.type === "leave") {
+        if (state.stage === "lobby") {
+          state.players = state.players.filter(p => p.id !== me.id);
+          if (state.hostId === me.id && state.players.length) {
+            state.hostId = state.players[0].id;
+            state.players[0].ready = true;
+          }
+          state.seats = Math.max(1, Math.min(state.seats, state.players.length));
+          this.note(state, me.name + " покинул комнату");
+        } else {
+          me.active = false;
+          this.note(state, me.name + " покинул партию");
         }
       } else if (data.type === "finish") {
         state.stage = "finished"; state.voteOpen = false;
