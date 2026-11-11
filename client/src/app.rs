@@ -40,6 +40,44 @@ fn avatar_symbol(id: u8) -> &'static str {
     const MARKS: [&str; 12] = ["✦", "◆", "☼", "✿", "★", "♣", "◇", "◈", "✧", "●", "☻", "♟"];
     MARKS[(id.saturating_sub(1) as usize) % MARKS.len()]
 }
+
+fn load_avatar_images(ctx: &egui::Context) -> Vec<Option<egui::TextureHandle>> {
+    (1u8..=12).map(|avatar| {
+        ["png", "jpg", "jpeg", "webp"].iter().find_map(|extension| {
+            let file = format!("{avatar:02}.{extension}");
+            // Portable release: assets next to Murr-Bunker.exe.
+            // Developer builds: sources in client/assets/avatars.
+            let paths = [
+                portable_path(&format!("avatars/{file}")),
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets").join("avatars").join(&file),
+            ];
+            for path in paths {
+                let Ok(data) = fs::read(path) else { continue };
+                if data.len() > 3_000_000 { continue; }
+                // Reject overly large images before allocating the decoded texture.
+                let dimensions = image::ImageReader::new(Cursor::new(&data))
+                    .with_guessed_format().ok()
+                    .and_then(|reader| reader.into_dimensions().ok());
+                let Some((width, height)) = dimensions else { continue };
+                if width == 0 || height == 0 || width > 1024 || height > 1024 {
+                    continue;
+                }
+                let Ok(img) = image::load_from_memory(&data) else { continue };
+                let img = img.to_rgba8();
+                let texture = ctx.load_texture(
+                    format!("avatar-{avatar:02}"),
+                    egui::ColorImage::from_rgba_unmultiplied(
+                        [width as usize, height as usize], img.as_raw()
+                    ),
+                    egui::TextureOptions::LINEAR,
+                );
+                return Some(texture);
+            }
+            None
+        })
+    }).collect()
+}
+
 fn configure_ui(ctx: &egui::Context) {
     // Manrope is loaded from a user-installed Windows font, not bundled or downloaded.
     let mut candidates = vec![
@@ -122,6 +160,7 @@ pub struct BunkerApp {
     server_url: String,
     nickname: String,
     avatar: Option<u8>,
+    avatar_images: Vec<Option<egui::TextureHandle>>,
     profile_ready: bool,
     join_code: String,
     status: String,
@@ -156,13 +195,21 @@ pub struct BunkerApp {
 impl BunkerApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         configure_ui(&cc.egui_ctx);
-        let config = fs::read_to_string(portable_path("murr-config.json")).ok()
+        let mut config = fs::read_to_string(portable_path("murr-config.json")).ok()
             .and_then(|s| serde_json::from_str::<LocalConfig>(&s).ok()).unwrap_or_default();
+        // Upgrade the original local prototype address, which used to be saved
+        // in murr-config.json. Preserve all custom server addresses.
+        if matches!(config.server_url.trim().trim_end_matches('/'),
+            "" | "http://127.0.0.1:8787" | "http://localhost:8787") {
+            config.server_url = LocalConfig::default().server_url;
+        }
+        let avatar_images = load_avatar_images(&cc.egui_ctx);
         let profile_ready = !config.nickname.trim().is_empty();
         Self {
             server_url: config.server_url,
             nickname: config.nickname,
             avatar: if profile_ready { Some(config.avatar) } else { None },
+            avatar_images,
             profile_ready, join_code: String::new(),
             status: "Готово к подключению".into(),
             session: None, room: None, pending: None, sender: None, receiver: None, online: false,
@@ -400,35 +447,31 @@ impl BunkerApp {
         self.online = false;
         self.status = "Вы вышли в главное меню".into();
     }
-    fn avatar_widget(ui: &mut egui::Ui, avatar: u8, selected: bool, size: f32) -> egui::Response {
-        let label = RichText::new(avatar_symbol(avatar)).size(size * 0.45).color(Color32::WHITE);
-        ui.add(egui::Button::new(label)
-            .fill(avatar_color(avatar).gamma_multiply(if selected { 0.85 } else { 0.5 }))
-            .stroke(if selected { Stroke::new(2.0_f32, GOLD) } else { Stroke::new(1.0_f32, SUBTLE) })
-            .min_size(egui::vec2(size, size)))
-    }
-    fn top_bar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("murr-top").frame(
-            egui::Frame::new().fill(Color32::from_rgb(9,9,11)).inner_margin(egui::Margin::symmetric(16,10))
-        ).show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("MURR / БУНКЕР").strong().color(GOLD).size(18.0));
-                if let Some(room) = &self.room {
-                    ui.separator();
-                    ui.label(format!("Комната {}", room.code));
-                    ui.label(if self.online { "● Онлайн" } else { "○ Нет соединения" });
-                    ui.label(format!("Игроки: {}", room.players.len()));
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.profile_ready {
-                        ui.label(RichText::new(self.nickname.as_str()).color(MUTED));
-                        if let Some(av) = self.avatar {
-                            Self::avatar_widget(ui, av, false, 28.0);
-                        }
-                    }
-                });
-            });
-        });
+    fn avatar_widget(
+        ui: &mut egui::Ui, avatar: u8, selected: bool, size: f32,
+        images: &[Option<egui::TextureHandle>],
+    ) -> egui::Response {
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 4.0, avatar_color(avatar).gamma_multiply(0.55));
+        if let Some(texture) = images.get(avatar.saturating_sub(1) as usize).and_then(Option::as_ref) {
+            painter.image(
+                texture.id(), rect.shrink(2.0),
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        } else {
+            painter.text(
+                rect.center(), egui::Align2::CENTER_CENTER, avatar_symbol(avatar),
+                egui::FontId::proportional(size * 0.45), Color32::WHITE,
+            );
+        }
+        painter.rect_stroke(
+            rect, 4.0,
+            Stroke::new(if selected { 2.0_f32 } else { 1.0_f32 }, if selected { GOLD } else { SUBTLE }),
+            egui::StrokeKind::Outside,
+        );
+        response
     }
     fn ui_welcome(&mut self, ui: &mut egui::Ui) {
         ui.add_space(ui.available_height().max(300.0) * 0.16);
@@ -439,7 +482,7 @@ impl BunkerApp {
             ui.add_space(35.0);
             ui.horizontal(|ui| {
                 ui.add_space((ui.available_width() - 555.0).max(0.0) * 0.5);
-                if Self::avatar_widget(ui, self.avatar.unwrap_or(1), self.avatar.is_some(), 70.0).clicked() {
+                if Self::avatar_widget(ui, self.avatar.unwrap_or(1), self.avatar.is_some(), 70.0, &self.avatar_images).clicked() {
                     self.show_avatar_picker = true;
                 }
                 ui.add(egui::TextEdit::singleline(&mut self.nickname)
@@ -456,7 +499,7 @@ impl BunkerApp {
         ui.vertical_centered(|ui| {
             ui.horizontal(|ui| {
                 ui.add_space((ui.available_width() - 260.0).max(0.0) * 0.5);
-                Self::avatar_widget(ui, self.avatar.unwrap_or(1), true, 58.0);
+                Self::avatar_widget(ui, self.avatar.unwrap_or(1), true, 58.0, &self.avatar_images);
                 ui.label(RichText::new(&self.nickname).size(26.0).strong());
             });
             ui.add_space(52.0);
@@ -487,7 +530,7 @@ impl BunkerApp {
             for (i, player) in room.players.iter().enumerate() {
                 cols[i % 3].horizontal(|ui| {
                     ui.label(RichText::new("▏").size(40.0).color(if player.ready || player.id == room.host_id { GREEN } else { RED }));
-                    Self::avatar_widget(ui, player.avatar, false, 47.0);
+                    Self::avatar_widget(ui, player.avatar, false, 47.0, &self.avatar_images);
                     ui.vertical(|ui| {
                         ui.label(RichText::new(&player.name).size(19.0).strong());
                         if player.id == room.host_id {
@@ -655,7 +698,7 @@ impl BunkerApp {
                     ui.end_row();
                     for p in &room.players {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(avatar_symbol(p.avatar)).color(avatar_color(p.avatar)).size(23.0));
+                            Self::avatar_widget(ui, p.avatar, false, 30.0, &self.avatar_images);
                             ui.vertical(|ui| {
                                 ui.label(RichText::new(&p.name).strong());
                                 ui.label(RichText::new(if p.active { "Участник" } else { "Выбыл" })
@@ -691,7 +734,7 @@ impl BunkerApp {
                 ui.add_sized([390.0,35.0], egui::Label::new("Спец. возможность 2"));
                 ui.end_row();
                 for p in &room.players {
-                    ui.label(format!("{} {}", avatar_symbol(p.avatar), p.name));
+                    ui.horizontal(|ui| { Self::avatar_widget(ui, p.avatar, false, 29.0, &self.avatar_images); ui.label(&p.name); });
                     for kind in ["ability", "ability2"] {
                         let card = p.cards.iter().find(|c| c.kind == kind);
                         ui.horizontal(|ui| {
@@ -759,7 +802,7 @@ impl BunkerApp {
         ui.vertical_centered(|ui| {
             ui.label(format!("Осталось участников: {}", room.players.iter().filter(|p| p.active).count()));
             for p in room.players.iter().filter(|p| p.active) {
-                ui.label(format!("{} {}", avatar_symbol(p.avatar), p.name));
+                ui.horizontal(|ui| { Self::avatar_widget(ui, p.avatar, false, 29.0, &self.avatar_images); ui.label(&p.name); });
             }
             if ui.add(accent_button("Оценка выживаемости · WIP")).clicked() {
                 self.show_survivability = true;
@@ -770,11 +813,11 @@ impl BunkerApp {
     fn ui_overlays(&mut self, ctx: &egui::Context) {
         if self.show_avatar_picker {
             let mut open = true;
-            egui::Window::new("Выбор аватара").open(&mut open).collapsible(false).show(ctx, |ui| {
-                ui.label("Пока доступны двенадцать встроенных аватаров-заглушек. Позже заменим их изображениями.");
+            egui::Window::new("Выбор аватара").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open).show(ctx, |ui| {
+                ui.label("Аватарки: папка avatars рядом с EXE, файлы 01.png–12.png. При отсутствии файла — цветной значок.");
                 egui::Grid::new("avatar-selector-grid").num_columns(6).spacing([8.0,8.0]).show(ui, |ui| {
                     for id in 1..=12 {
-                        if Self::avatar_widget(ui, id, self.avatar == Some(id), 62.0).clicked() {
+                        if Self::avatar_widget(ui, id, self.avatar == Some(id), 62.0, &self.avatar_images).clicked() {
                             self.avatar = Some(id);
                             self.show_avatar_picker = false;
                         }
@@ -786,7 +829,7 @@ impl BunkerApp {
         }
         if self.show_join {
             let mut open = true;
-            egui::Window::new("Присоединиться к игре").open(&mut open).collapsible(false).show(ctx, |ui| {
+            egui::Window::new("Присоединиться к игре").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open).show(ctx, |ui| {
                 ui.label("Введи код комнаты:");
                 ui.add(egui::TextEdit::singleline(&mut self.join_code).desired_width(260.0));
                 if ui.add(accent_button("Присоединиться →")).clicked() {
@@ -801,8 +844,8 @@ impl BunkerApp {
         }
         if self.show_create {
             let mut open = true;
-            egui::Window::new("Создать игру").open(&mut open)
-                .collapsible(false).resizable(true).default_width(480.0).show(ctx, |ui| {
+            egui::Window::new("Создать игру").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open)
+                .default_width(480.0).show(ctx, |ui| {
                 ui.label(RichText::new("Набор карт").strong().size(19.0));
                 ui.label(if self.pack_file.is_empty() { "Murr: стартовый набор" } else { &self.pack_file });
                 if ui.button("Выбрать JSON / ZIP-пак…").clicked() { self.pick_pack(); }
@@ -821,7 +864,7 @@ impl BunkerApp {
         }
         if self.show_settings {
             let mut open = true;
-            egui::Window::new("Настройки — WIP").open(&mut open).show(ctx, |ui| {
+            egui::Window::new("Настройки — WIP").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open).show(ctx, |ui| {
                 ui.label("Адрес сервера:");
                 ui.add(egui::TextEdit::singleline(&mut self.server_url).desired_width(430.0));
                 ui.label("Параметры графики, управления и звука появятся позже.");
@@ -832,8 +875,8 @@ impl BunkerApp {
         if self.show_host_tools {
             let mut open = true;
             let snapshot = self.room.clone();
-            egui::Window::new("Параметры комнаты / ведущий").open(&mut open)
-                .resizable(true).default_width(430.0).show(ctx, |ui| {
+            egui::Window::new("Параметры комнаты / ведущий").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open)
+                .default_width(430.0).show(ctx, |ui| {
                 if let Some(room) = snapshot {
                     let host = room.you == room.host_id;
                     ui.label(format!("Пак: {}", room.pack_name));
@@ -878,8 +921,8 @@ impl BunkerApp {
         }
         if let Some((player, kind)) = self.editor.clone() {
             let mut open = true;
-            egui::Window::new("Редактор характеристики ведущего").open(&mut open)
-                .resizable(true).default_width(470.0).show(ctx, |ui| {
+            egui::Window::new("Редактор характеристики ведущего").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open)
+                .default_width(470.0).show(ctx, |ui| {
                 ui.label(format!("Категория: {} · Редактирование видно всем после раскрытия", kind));
                 ui.add(egui::TextEdit::multiline(&mut self.editor_value)
                     .desired_rows(3).desired_width(450.0));
@@ -902,7 +945,7 @@ impl BunkerApp {
         }
         if self.show_survivability {
             let mut open = true;
-            egui::Window::new("Оценка выживаемости — WIP").open(&mut open).show(ctx, |ui| {
+            egui::Window::new("Оценка выживаемости — WIP").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open).show(ctx, |ui| {
                 ui.label("Сюжетные финалы и расчёт ресурсов будут добавлены после завершения основных правил.");
                 ui.label("Пока здесь намеренно нет выдуманной оценки.");
             });
@@ -915,7 +958,6 @@ impl eframe::App for BunkerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_network(ctx);
         ctx.request_repaint_after(Duration::from_millis(80));
-        self.top_bar(ctx);
         egui::TopBottomPanel::bottom("murr-status")
             .frame(egui::Frame::new().fill(Color32::from_rgb(12,12,14)).inner_margin(8))
             .show(ctx, |ui| {
