@@ -2,6 +2,7 @@ use crate::model::{category_name, Card, LocalConfig, Room, Session};
 use crate::appearance::{portable_path, with_icon, FontWeight, Layout, Theme};
 use crate::artwork::{centered_row, flat_button, input_row, paint_cover, paint_gradient, table_cell, Artwork, Icon};
 use crate::network;
+use crate::motion::{animated_button, button_highlight, modal_opacity, screen_opacity};
 use eframe::egui::{self, Color32, RichText, Stroke};
 use ewebsock::{WsEvent, WsMessage, WsSender};
 use serde_json::{json, Value};
@@ -151,6 +152,9 @@ struct Toast {
     started: Instant,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Screen { Welcome, Menu, Lobby, Game, Finished }
+
 pub struct BunkerApp {
     theme: Theme,
     artwork: Artwork,
@@ -161,6 +165,7 @@ pub struct BunkerApp {
     avatar: Option<u8>,
     avatar_images: Vec<Option<egui::TextureHandle>>,
     profile_ready: bool,
+    screen_transition: Option<(Screen, f64)>,
     join_code: String,
     session: Option<Session>,
     room: Option<Room>,
@@ -218,7 +223,7 @@ impl BunkerApp {
             nickname: config.nickname,
             avatar: if profile_ready { Some(config.avatar) } else { None },
             avatar_images,
-            profile_ready, join_code: String::new(),
+            profile_ready, screen_transition: None, join_code: String::new(),
             session: None, room: None, pending: None, sender: None, receiver: None, online: false,
             create_on_connect: false,
             show_avatar_picker: false, show_join: false, show_create: false,
@@ -523,6 +528,7 @@ impl BunkerApp {
             Stroke::new(2.0_f32, if selected { self.theme.palette.accent.color() } else { self.theme.palette.text.color() }),
             egui::StrokeKind::Outside,
         );
+        button_highlight(ui, &response);
         response
     }
     fn ui_welcome(&mut self, ui: &mut egui::Ui) {
@@ -909,7 +915,7 @@ impl BunkerApp {
                 ui.painter().circle_stroke(center, DOSSIER_INFO_SIZE / 2.0 - 1.0, Stroke::new(1.0_f32, color));
                 let info = egui::Button::new(FontWeight::Bold.text(11.0, "!").color(color))
                     .frame(false).min_size(rect.size());
-                let response = ui.place(rect, info);
+                let response = ui.place(rect, animated_button(info));
                 egui::Popup::menu(&response).show(|ui| { ui.label(description); });
                 response.on_hover_text(description);
                 value_right = rect.left() - DOSSIER_GAP;
@@ -922,7 +928,7 @@ impl BunkerApp {
             );
             ui.place(name_rect, egui::Label::new(label));
             ui.place(value_rect, egui::Label::new(value));
-            let button = ui.place(lock_rect, |ui: &mut egui::Ui| ui.add_enabled(active && !card.revealed, button));
+            let button = ui.place(lock_rect, |ui: &mut egui::Ui| ui.add_enabled(active && !card.revealed, animated_button(button)));
             if button.on_hover_text(tooltip).on_disabled_hover_text(tooltip).clicked() {
                 self.send(json!({"type":"reveal","kind":card.kind}));
             }
@@ -1020,7 +1026,7 @@ impl BunkerApp {
                                         ("Вернуть", self.theme.palette.positive.color())
                                     };
                                     let action = egui::Button::new(FontWeight::Medium.text(text_size, label).color(color)).frame(false);
-                                    if action_ui.add(action).clicked() {
+                                    if action_ui.add(animated_button(action)).clicked() {
                                         self.send(json!({"type":"set_active","playerId":player.id,"active":!player.active}));
                                     }
                                 } else {
@@ -1042,7 +1048,7 @@ impl BunkerApp {
                                     let icon = self.artwork.button(Icon::Edit, &self.theme.icons.edit, edit_size * 0.72).frame(false);
                                     let response = ui.place(edit_rect, |ui: &mut egui::Ui| {
                                         ui.multiply_opacity(0.5);
-                                        ui.add(icon)
+                                        ui.add(animated_button(icon))
                                     });
                                     if response.on_hover_text("Изменить карточку").clicked() {
                                         self.edit_card(&player.id, kind, card.map(|card| card.value.as_str()).unwrap_or(""));
@@ -1094,22 +1100,22 @@ impl BunkerApp {
             }
             ui.horizontal_wrapped(|ui| {
                 if room.you == room.host_id {
-                    if ui.add(self.theme.accent_button("Панель ведущего")).clicked() { self.show_host_tools = true; }
-                    if ui.button("Следующий раунд").clicked() { self.send(json!({"type":"next_round"})); }
-                    if ui.button(if room.vote_open {"Закрыть голосование"} else {"Начать голосование"}).clicked() {
+                    if ui.add(animated_button(self.theme.accent_button("Панель ведущего"))).clicked() { self.show_host_tools = true; }
+                    if ui.add(animated_button(egui::Button::new("Следующий раунд"))).clicked() { self.send(json!({"type":"next_round"})); }
+                    if ui.add(animated_button(egui::Button::new(if room.vote_open {"Закрыть голосование"} else {"Начать голосование"}))).clicked() {
                         self.send(json!({"type":if room.vote_open {"finish_vote"} else {"start_vote"}}));
                     }
-                    if ui.button("Завершить").clicked() { self.send(json!({"type":"finish"})); }
+                    if ui.add(animated_button(egui::Button::new("Завершить"))).clicked() { self.send(json!({"type":"finish"})); }
                 }
                 ui.add(egui::DragValue::new(&mut self.dice_sides).range(2..=100).prefix("d"));
-                if ui.button("Бросить кубик").clicked() {
+                if ui.add(animated_button(egui::Button::new("Бросить кубик"))).clicked() {
                     self.send(json!({"type":"roll","sides":self.dice_sides}));
                 }
             });
             if room.vote_open {
                 ui.label(format!("Голосование открыто · получено голосов: {}", room.ballots_count));
                 for p in room.players.iter().filter(|p| p.active && p.id != room.you) {
-                    if ui.button(format!("Голосовать за {}", p.name)).clicked() {
+                    if ui.add(animated_button(egui::Button::new(format!("Голосовать за {}", p.name)))).clicked() {
                         self.send(json!({"type":"vote","target":p.id}));
                     }
                 }
@@ -1138,13 +1144,13 @@ impl BunkerApp {
             for p in room.players.iter().filter(|p| p.active) {
                 ui.horizontal(|ui| { self.avatar_widget(ui, p.avatar, false, 29.0); ui.label(&p.name); });
             }
-            if ui.add(self.theme.accent_button("Оценка выживаемости · WIP")).clicked() {
+            if ui.add(animated_button(self.theme.accent_button("Оценка выживаемости · WIP"))).clicked() {
                 self.show_survivability = true;
             }
-            if ui.button("В главное меню").clicked() { self.leave_room(); }
+            if ui.add(animated_button(egui::Button::new("В главное меню"))).clicked() { self.leave_room(); }
         });
     }
-    fn room_creation(&mut self, ui: &mut egui::Ui, width: f32, list_height: f32) {
+    fn room_creation(&mut self, ui: &mut egui::Ui, width: f32, list_height: f32, active: bool) {
         ui.set_width(width);
         let gap = ui.spacing().item_spacing.x;
         let column_width = (width - gap) / 2.0;
@@ -1180,8 +1186,8 @@ impl BunkerApp {
                                 let strip = egui::Rect::from_min_size(rect.min, egui::vec2(5.0, rect.height()));
                                 ui.painter().rect_filled(strip, 0u8, status);
                                 let button_rect = egui::Rect::from_min_max(rect.min + egui::vec2(8.0, 0.0), rect.max);
-                                let response = ui.place(button_rect, egui::Button::new(title).truncate()
-                                    .fill(self.theme.palette.input.color()).corner_radius(0u8).min_size(button_rect.size()));
+                                let response = ui.place(button_rect, animated_button(egui::Button::new(title).truncate()
+                                    .fill(self.theme.palette.input.color()).corner_radius(0u8).min_size(button_rect.size())));
                                 if response.on_hover_text(entry.error().unwrap_or(entry.name())).clicked() {
                                     entry.toggle();
                                     changed = true;
@@ -1191,10 +1197,10 @@ impl BunkerApp {
                 });
             list_rect = frame.response.rect;
             left.horizontal(|ui| {
-                if ui.add_sized([(column_width - gap - 40.0).max(80.0), 38.0], egui::Button::new("Добавить пак")).clicked() {
+                if ui.add_sized([(column_width - gap - 40.0).max(80.0), 38.0], animated_button(egui::Button::new("Добавить пак"))).clicked() {
                     picked = rfd::FileDialog::new().add_filter("Паки Murr", &["json", "zip"]).pick_files();
                 }
-                if ui.add_sized([40.0, 38.0], egui::Button::new("↻")).on_hover_text("Обновить паки с диска").clicked() {
+                if ui.add_sized([40.0, 38.0], animated_button(egui::Button::new("↻"))).on_hover_text("Обновить паки с диска").clicked() {
                     reload = true;
                 }
             });
@@ -1209,10 +1215,11 @@ impl BunkerApp {
             right.add_space(remaining);
             right.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let available = self.room_packs.iter().any(crate::packs::Entry::active) && self.pending.is_none();
-                create = ui.add_enabled(available, self.theme.accent_button("Создать комнату")).clicked();
+                create = ui.add_enabled(available, animated_button(self.theme.accent_button("Создать комнату"))).clicked();
             });
         });
 
+        if !active { return; }
         let mut files = picked.unwrap_or_default();
         // Native Windows file-drop events don't carry coordinates.
         ui.input_mut(|input| {
@@ -1248,84 +1255,108 @@ impl BunkerApp {
     }
 
     fn ui_overlays(&mut self, ctx: &egui::Context) {
-        if self.show_avatar_picker {
-            let modal = egui::Modal::new(egui::Id::new("choose-avatar"))
-                .frame(egui::Frame::new().fill(self.theme.palette.panel.color()).corner_radius(5u8)
-                    .stroke(Stroke::new(1.0_f32, self.theme.palette.accent.color())).inner_margin(15))
-                .show(ctx, |ui| {
-                    let columns = self.layout.avatar_picker_columns;
-                    let gap = ui.spacing().item_spacing.x;
-                    let side = self.layout.avatar_picker_size.min(
-                        (ctx.content_rect().width() - gap * f32::from(columns - 1) - 60.0) / f32::from(columns)
-                    );
-                    let grid_width = side * f32::from(columns) + gap * f32::from(columns - 1);
-                    ui.set_width(grid_width);
-                    ui.vertical_centered(|ui| { ui.label(FontWeight::Regular.text(self.theme.fonts.avatar_caption, "Выберите аватар:")); });
-                    ui.add_space(8.0);
-                    for row in (1u8..=12).collect::<Vec<_>>().chunks(usize::from(columns)) {
-                        let width = side * row.len() as f32 + gap * (row.len() - 1) as f32;
-                        centered_row(ui, width, side, |ui| {
-                            for &id in row {
-                                if self.avatar_widget(ui, id, self.avatar == Some(id), side).clicked() {
-                                    self.avatar = Some(id);
-                                    self.show_avatar_picker = false;
-                                    if self.profile_ready { self.save_config(); }
+        {
+            let id = egui::Id::new("choose-avatar");
+            let active = self.show_avatar_picker;
+            let opacity = modal_opacity(ctx, id, active);
+            if opacity > 0.0 {
+                let modal = egui::Modal::new(id)
+                    .area(egui::Modal::default_area(id).fade_in(false).interactable(active))
+                    .backdrop_color(Color32::from_black_alpha((100.0 * opacity) as u8))
+                    .frame(egui::Frame::new().fill(self.theme.palette.panel.color()).corner_radius(5u8)
+                        .stroke(Stroke::new(1.0_f32, self.theme.palette.accent.color())).inner_margin(15).multiply_with_opacity(opacity))
+                    .show(ctx, |ui| {
+                        ui.multiply_opacity(opacity);
+                        if !active { ui.disable(); }
+                        let columns = self.layout.avatar_picker_columns;
+                        let gap = ui.spacing().item_spacing.x;
+                        let side = self.layout.avatar_picker_size.min(
+                            (ctx.content_rect().width() - gap * f32::from(columns - 1) - 60.0) / f32::from(columns)
+                        );
+                        let grid_width = side * f32::from(columns) + gap * f32::from(columns - 1);
+                        ui.set_width(grid_width);
+                        ui.vertical_centered(|ui| { ui.label(FontWeight::Regular.text(self.theme.fonts.avatar_caption, "Выберите аватар:")); });
+                        ui.add_space(8.0);
+                        for row in (1u8..=12).collect::<Vec<_>>().chunks(usize::from(columns)) {
+                            let width = side * row.len() as f32 + gap * (row.len() - 1) as f32;
+                            centered_row(ui, width, side, |ui| {
+                                for &id in row {
+                                    if self.avatar_widget(ui, id, self.avatar == Some(id), side).clicked() {
+                                        self.avatar = Some(id);
+                                        self.show_avatar_picker = false;
+                                        if self.profile_ready { self.save_config(); }
+                                    }
+                                }
+                            });
+                        }
+                    });
+                if active && modal.should_close() { self.show_avatar_picker = false; }
+            }
+        }
+        {
+            let id = egui::Id::new("join-room");
+            let active = self.show_join;
+            let opacity = modal_opacity(ctx, id, active);
+            if opacity > 0.0 {
+                let modal = egui::Modal::new(id)
+                    .area(egui::Modal::default_area(id).fade_in(false).interactable(active))
+                    .backdrop_color(Color32::from_black_alpha((100.0 * opacity) as u8))
+                    .frame(egui::Frame::new().fill(self.theme.palette.background.color()).inner_margin(12).multiply_with_opacity(opacity))
+                    .show(ctx, |ui| {
+                        ui.multiply_opacity(opacity);
+                        if !active { ui.disable(); }
+                        let side = self.layout.entry_button_size;
+                        let field = self.layout.welcome_name_width;
+                        let row_width = side + field + ui.spacing().item_spacing.x;
+                        ui.set_width(row_width);
+                        centered_row(ui, row_width, side, |ui| {
+                            let field = input_row(ui, &mut self.join_code, "Введите код игры", field, side, self.theme.palette.input.color(), FontWeight::SemiBold.font(self.theme.fonts.input));
+                            let button = self.artwork.button(Icon::Join, "→", self.theme.fonts.icon);
+                            let submit = flat_button(ui, [side; 2], button, self.theme.accent_gradient(), self.theme.buttons.radius)
+                                .on_hover_text("Присоединиться");
+                            if submit.clicked() || (field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+                                let code = self.join_code.trim().to_uppercase();
+                                if code.len() == 8 && code.chars().all(|c| c.is_ascii_alphanumeric()) {
+                                    self.start_request(Some(code));
+                                    self.show_join = false;
+                                } else {
+                                    self.notify("Нужен восьмисимвольный код");
                                 }
                             }
                         });
-                    }
-                });
-            if modal.should_close() { self.show_avatar_picker = false; }
-        }
-        if self.show_join {
-            let modal = egui::Modal::new(egui::Id::new("join-room"))
-                .frame(egui::Frame::new().fill(self.theme.palette.background.color()).inner_margin(12))
-                .show(ctx, |ui| {
-                    let side = self.layout.entry_button_size;
-                    let field = self.layout.welcome_name_width;
-                    let row_width = side + field + ui.spacing().item_spacing.x;
-                    ui.set_width(row_width);
-                    centered_row(ui, row_width, side, |ui| {
-                        let field = input_row(ui, &mut self.join_code, "Введите код игры", field, side, self.theme.palette.input.color(), FontWeight::SemiBold.font(self.theme.fonts.input));
-                        let button = self.artwork.button(Icon::Join, "→", self.theme.fonts.icon);
-                        let submit = flat_button(ui, [side; 2], button, self.theme.accent_gradient(), self.theme.buttons.radius)
-                            .on_hover_text("Присоединиться");
-                        if submit.clicked() || (field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
-                            let code = self.join_code.trim().to_uppercase();
-                            if code.len() == 8 && code.chars().all(|c| c.is_ascii_alphanumeric()) {
-                                self.start_request(Some(code));
-                                self.show_join = false;
-                            } else {
-                                self.notify("Нужен восьмисимвольный код");
-                            }
-                        }
                     });
-                });
-            if modal.should_close() { self.show_join = false; }
+                if active && modal.should_close() { self.show_join = false; }
+            }
         }
-        if self.show_create {
+        {
+            let active = self.show_create;
             let screen = ctx.content_rect().size();
             let width = (self.layout.dialog_width * 1.85).min(screen.x - 64.0);
             let list_height = (screen.y * 0.60).clamp(180.0, 460.0);
-            let mut open = true;
+            let mut open = active;
             egui::Window::new("Создать игру").anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .movable(false).resizable(false).collapsible(false).open(&mut open)
+                .movable(false).resizable(false).collapsible(false).open(&mut open).fade_in(true).fade_out(true).interactable(active)
                 .default_width(width).min_width(width).max_width(width)
                 .frame(egui::Frame::new().fill(self.theme.palette.background.color())
                     .stroke(Stroke::new(1.0_f32, self.theme.palette.button.color())).inner_margin(18))
-                .show(ctx, |ui| self.room_creation(ui, width, list_height));
+                .show(ctx, |ui| {
+                    if !active { ui.disable(); }
+                    self.room_creation(ui, width, list_height, active);
+                });
             self.show_create &= open;
         }
-        if self.show_settings {
-            let mut open = true;
-            egui::Window::new("Настройки").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open).show(ctx, |ui| {
+        {
+            let active = self.show_settings;
+            let mut open = active;
+            egui::Window::new("Настройки").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open).fade_in(true).fade_out(true).interactable(active).show(ctx, |ui| {
+                if !active { ui.disable(); }
                 ui.vertical_centered(|ui| {
                     ui.label("Адрес сервера:");
                     ui.add(egui::TextEdit::singleline(&mut self.server_url).desired_width(430.0));
 
-                    if ui.button("Сохранить").clicked() { self.save_config(); }
+                    if ui.add(animated_button(egui::Button::new("Сохранить"))).clicked() { self.save_config(); }
                     ui.separator();
-                    if ui.button("Перезагрузить оформление").on_hover_text("Ctrl+Shift+R").clicked() {
+                    if ui.add(animated_button(egui::Button::new("Перезагрузить оформление"))).on_hover_text("Ctrl+Shift+R").clicked() {
                         self.reload_appearance(ctx);
                     }
                     ui.label(portable_path("theme.json").parent().unwrap_or(Path::new(".")).display().to_string());
@@ -1333,11 +1364,13 @@ impl BunkerApp {
             });
             self.show_settings = open;
         }
-        if self.show_host_tools {
-            let mut open = true;
+        {
+            let active = self.show_host_tools;
+            let mut open = active;
             let snapshot = self.room.clone();
-            egui::Window::new("Параметры комнаты / ведущий").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open)
+            egui::Window::new("Параметры комнаты / ведущий").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open).fade_in(true).fade_out(true).interactable(active)
                 .default_width(430.0).show(ctx, |ui| {
+                if !active { ui.disable(); }
                 if let Some(room) = snapshot {
                     let host = room.you == room.host_id;
                     ui.label(format!("Пак: {}", room.pack_name));
@@ -1355,19 +1388,19 @@ impl BunkerApp {
                             if ui.add(egui::Slider::new(&mut chance, 0..=100).text("Шанс событий (WIP)")).changed() {
                                 self.send(json!({"type":"set_event_chance","chance":chance}));
                             }
-                            if ui.button("Выбрать другой пак…").clicked() { self.pick_pack(); }
-                            if ui.button("Применить выбранный пак").clicked() { self.apply_pack(); }
+                            if ui.add(animated_button(egui::Button::new("Выбрать другой пак…"))).clicked() { self.pick_pack(); }
+                            if ui.add(animated_button(egui::Button::new("Применить выбранный пак"))).clicked() { self.apply_pack(); }
                         }
                         if room.stage == "playing" {
                             ui.horizontal(|ui| {
-                                if ui.button("Следующий раунд").clicked() { self.send(json!({"type":"next_round"})); }
-                                if ui.button("Завершить партию").clicked() { self.send(json!({"type":"finish"})); }
+                                if ui.add(animated_button(egui::Button::new("Следующий раунд"))).clicked() { self.send(json!({"type":"next_round"})); }
+                                if ui.add(animated_button(egui::Button::new("Завершить партию"))).clicked() { self.send(json!({"type":"finish"})); }
                             });
                             ui.separator();
                             for p in &room.players {
                                 ui.horizontal(|ui| {
                                     ui.label(&p.name);
-                                    if ui.button(if p.active {"Исключить"} else {"Вернуть"}).clicked() {
+                                    if ui.add(animated_button(egui::Button::new(if p.active {"Исключить"} else {"Вернуть"}))).clicked() {
                                         self.send(json!({"type":"set_active","playerId":p.id,"active":!p.active}));
                                     }
                                 });
@@ -1380,23 +1413,29 @@ impl BunkerApp {
             });
             self.show_host_tools = open;
         }
-        if let Some((player, kind)) = self.editor.clone() {
-            let mut open = true;
-            egui::Window::new("Редактор характеристики ведущего").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open)
+        let editor_id = egui::Id::new("editor-fade-content");
+        let active = self.editor.is_some();
+        if let Some(editor) = self.editor.clone() {
+            ctx.data_mut(|data| data.insert_temp(editor_id, editor));
+        }
+        if let Some((player, kind)) = ctx.data(|data| data.get_temp::<(String, String)>(editor_id)) {
+            let mut open = active;
+            egui::Window::new("Редактор характеристики ведущего").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open).fade_in(true).fade_out(true).interactable(active)
                 .default_width(470.0).show(ctx, |ui| {
+                if !active { ui.disable(); }
                 ui.label(format!("Категория: {} · Редактирование видно всем после раскрытия", kind));
                 ui.add(egui::TextEdit::multiline(&mut self.editor_value)
                     .desired_rows(3).desired_width(450.0));
                 ui.horizontal_wrapped(|ui| {
-                    if ui.button("Применить текст").clicked() {
+                    if ui.add(animated_button(egui::Button::new("Применить текст"))).clicked() {
                         self.send(json!({"type":"host_edit_card","playerId":player,"kind":kind,"value":self.editor_value}));
                         self.editor = None;
                     }
-                    if ui.button("Открыть всем").clicked() {
+                    if ui.add(animated_button(egui::Button::new("Открыть всем"))).clicked() {
                         self.send(json!({"type":"host_reveal_card","playerId":player,"kind":kind}));
                         self.editor = None;
                     }
-                    if ui.button("Перегенерировать").clicked() {
+                    if ui.add(animated_button(egui::Button::new("Перегенерировать"))).clicked() {
                         self.send(json!({"type":"host_redraw_card","playerId":player,"kind":kind}));
                         self.editor = None;
                     }
@@ -1404,9 +1443,11 @@ impl BunkerApp {
             });
             if !open { self.editor = None; }
         }
-        if self.show_survivability {
-            let mut open = true;
-            egui::Window::new("Оценка выживаемости — WIP").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open).show(ctx, |ui| {
+        {
+            let active = self.show_survivability;
+            let mut open = active;
+            egui::Window::new("Оценка выживаемости — WIP").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open).fade_in(true).fade_out(true).interactable(active).show(ctx, |ui| {
+                if !active { ui.disable(); }
                 ui.label("Сюжетные финалы и расчёт ресурсов будут добавлены после завершения основных правил.");
                 ui.label("Пока здесь намеренно нет выдуманной оценки.");
             });
@@ -1421,8 +1462,24 @@ impl eframe::App for BunkerApp {
             self.reload_appearance(ctx);
         }
         self.poll_network(ctx);
+        let screen = match self.room.as_ref().map(|room| room.stage.as_str()) {
+            Some("lobby") => Screen::Lobby,
+            Some("playing") => Screen::Game,
+            Some(_) => Screen::Finished,
+            None if self.profile_ready => Screen::Menu,
+            None => Screen::Welcome,
+        };
+        let now = ctx.input(|input| input.time);
+        let (previous, started) = self.screen_transition.get_or_insert((screen, now));
+        if *previous != screen {
+            *previous = screen;
+            *started = now;
+        }
+        let opacity = screen_opacity(now - *started);
+        if opacity < 1.0 { ctx.request_repaint(); }
         egui::CentralPanel::default().frame(egui::Frame::new().fill(self.theme.palette.background.color()).inner_margin(self.layout.content_margin))
             .show(ctx, |ui| {
+                ui.multiply_opacity(opacity);
                 let room = self.room.clone();
                 if let Some(room) = room {
                     match room.stage.as_str() {
@@ -1433,7 +1490,7 @@ impl eframe::App for BunkerApp {
                             egui::Area::new(egui::Id::new("leave-game"))
                                 .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
                                 .movable(false).show(ctx, |ui| {
-                                    if ui.button("В меню").clicked() { self.leave_room(); }
+                                    if ui.add(animated_button(egui::Button::new("В меню"))).clicked() { self.leave_room(); }
                                 });
                         },
                         _ => self.ui_finished(ui, &room)

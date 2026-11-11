@@ -192,15 +192,8 @@ pub fn flat_button(
 ) -> Response {
     let behind = ui.painter().add(egui::Shape::Noop);
     let response = ui.add_sized(size, button.frame(false).min_size(size.into()));
-    let shade = |color: Color32| {
-        if response.is_pointer_button_down_on() {
-            color.gamma_multiply(0.75)
-        } else if response.hovered() || response.has_focus() {
-            color.gamma_multiply(1.15)
-        } else {
-            color
-        }
-    };
+    let (hover, pressed) = crate::motion::button_progress(ui, &response);
+    let shade = |color: Color32| color.gamma_multiply(1.0 + 0.15 * hover - 0.40 * pressed);
     let rect = response.rect;
     let shape = if colors[0] == colors[1] {
         egui::Shape::rect_filled(rect, radius, shade(colors[0]))

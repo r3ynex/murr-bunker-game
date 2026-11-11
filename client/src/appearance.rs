@@ -355,6 +355,7 @@ impl Theme {
 
         let mut style = (*ctx.style()).clone();
         let p = &self.palette;
+        style.animation_time = crate::motion::WINDOW_SECONDS;
         style.visuals = egui::Visuals::dark();
         style.visuals.override_text_color = Some(p.text.color());
         style.visuals.panel_fill = p.background.color();

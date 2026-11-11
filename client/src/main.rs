@@ -4,6 +4,7 @@ mod app;
 mod appearance;
 mod artwork;
 mod model;
+mod motion;
 mod network;
 mod packs;
 
