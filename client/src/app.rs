@@ -13,6 +13,21 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_PACK_BYTES: usize = 2_000_000;
 
+const DOSSIER_LOCK_SIZE: f32 = 24.0;
+const DOSSIER_INFO_SIZE: f32 = 16.0;
+const DOSSIER_GAP: f32 = 8.0;
+const TABLE_BOTTOM_GAP: f32 = 56.0;
+
+type DossierLabels = (std::sync::Arc<egui::Galley>, std::sync::Arc<egui::Galley>);
+
+fn game_body_width(available: f32) -> f32 {
+    available * 0.84
+}
+
+fn dossier_height((label, value): &DossierLabels) -> f32 {
+    label.size().y.max(value.size().y).max(DOSSIER_LOCK_SIZE)
+}
+
 fn random_int(min: u32, max: u32) -> u32 {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos()).unwrap_or(34567);
@@ -777,7 +792,6 @@ impl BunkerApp {
         ui.add_space(44.0);
         heading(ui, &self.theme, &format!("Досье игрока {}", me.name));
 
-        // PhotoCraft reads down the left column, then down the right column.
         const KINDS: [&str; 10] = [
             "gender", "body", "personality", "profession", "health",
             "hobby", "fear", "equipment", "backpack", "fact",
@@ -785,36 +799,47 @@ impl BunkerApp {
         const ABILITIES: [&str; 2] = ["ability", "ability2"];
         let columns = self.layout.dossier_columns;
         let rows = KINDS.len().div_ceil(columns);
-        let inset = (ui.available_width() * 0.08).min(127.0) as i8;
-        egui::Frame::new().inner_margin(egui::Margin::symmetric(inset, 0)).show(ui, |ui| {
-            ui.visuals_mut().widgets.noninteractive.bg_stroke.color = self.theme.palette.surface.color();
-            for row in 0..rows {
-                ui.columns(columns, |cols| {
-                    for (column, ui) in cols.iter_mut().enumerate() {
-                        if let Some(card) = KINDS.get(column * rows + row)
-                            .and_then(|&kind| me.cards.iter().find(|card| card.kind == kind))
-                        {
-                            self.dossier_card(ui, room, card, me.active);
+        let width = game_body_width(ui.available_width());
+        ui.vertical_centered(|ui| {
+            ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.set_width(width);
+                ui.visuals_mut().widgets.noninteractive.bg_stroke.color = self.theme.palette.surface.color();
+                let column_width = (width - (columns - 1) as f32 * ui.spacing().item_spacing.x) / columns as f32;
+                for row in 0..rows {
+                    let cells: Vec<_> = (0..columns).map(|column| {
+                        let kind = KINDS.get(column * rows + row)?;
+                        let card = me.cards.iter().find(|card| card.kind == *kind)?;
+                        Some((card, self.dossier_labels(ui, room, card, column_width)))
+                    }).collect();
+                    let height = cells.iter().flatten().map(|(_, labels)| dossier_height(labels))
+                        .fold(DOSSIER_LOCK_SIZE, f32::max);
+                    ui.columns(columns, |cols| {
+                        for (ui, cell) in cols.iter_mut().zip(cells) {
+                            if let Some((card, labels)) = cell {
+                                self.dossier_card(ui, card, me.active, labels, height);
+                            }
                         }
-                    }
-                });
-                ui.separator();
-            }
+                    });
+                    ui.separator();
+                }
 
-            let abilities = ABILITIES.iter().filter_map(|&kind| me.cards.iter().find(|card| card.kind == kind));
-            let extra = me.cards.iter().filter(|card| {
-                let kind = card.kind.as_str();
-                kind != "talent" && !KINDS.contains(&kind) && !ABILITIES.contains(&kind)
-            });
-            ui.add_space(8.0);
-            ui.vertical_centered(|ui| {
-                let width = ui.available_width() * 0.64;
-                ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
-                    ui.set_width(width);
-                    for card in abilities.chain(extra) {
-                        self.dossier_card(ui, room, card, me.active);
-                        ui.separator();
-                    }
+                let abilities = ABILITIES.iter().filter_map(|&kind| me.cards.iter().find(|card| card.kind == kind));
+                let extra = me.cards.iter().filter(|card| {
+                    let kind = card.kind.as_str();
+                    kind != "talent" && !KINDS.contains(&kind) && !ABILITIES.contains(&kind)
+                });
+                ui.add_space(8.0);
+                ui.vertical_centered(|ui| {
+                    let width = width * 0.64;
+                    ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.set_width(width);
+                        for card in abilities.chain(extra) {
+                            let labels = self.dossier_labels(ui, room, card, width);
+                            let height = dossier_height(&labels);
+                            self.dossier_card(ui, card, me.active, labels, height);
+                            ui.separator();
+                        }
+                    });
                 });
             });
         });
@@ -822,10 +847,27 @@ impl BunkerApp {
         if remaining > 0.0 { ui.add_space(remaining); }
     }
 
-    fn dossier_card(&mut self, ui: &mut egui::Ui, room: &Room, card: &Card, active: bool) {
-        let [x, y] = self.layout.dossier_padding;
+    fn dossier_labels(&self, ui: &mut egui::Ui, room: &Room, card: &Card, width: f32) -> DossierLabels {
         let size = self.theme.fonts.dossier;
+        let (value, description) = card.dossier_text();
+        let width = width - 2.0 * f32::from(self.layout.dossier_padding[0]);
+        let label_width = (width * 0.42).max(1.0);
+        let info_width = if description.is_some() { DOSSIER_INFO_SIZE + DOSSIER_GAP } else { 0.0 };
+        let value_width = (width - label_width - DOSSIER_LOCK_SIZE - 2.0 * DOSSIER_GAP - info_width).max(1.0);
         let name = room.category_labels.get(&card.kind).map(String::as_str).unwrap_or_else(|| category_name(&card.kind));
+        let label = egui::text::LayoutJob::simple(
+            name.to_owned(), FontWeight::Medium.font(size), self.theme.palette.text.color(), label_width,
+        );
+        let mut value = egui::text::LayoutJob::simple(
+            value.to_owned(), FontWeight::SemiBold.font(size), self.theme.palette.accent_title.color(), value_width,
+        );
+        value.halign = egui::Align::RIGHT;
+        ui.fonts_mut(|fonts| (fonts.layout_job(label), fonts.layout_job(value)))
+    }
+
+    fn dossier_card(&mut self, ui: &mut egui::Ui, card: &Card, active: bool, (label, value): DossierLabels, height: f32) {
+        let [x, y] = self.layout.dossier_padding;
+        let (_, description) = card.dossier_text();
         let (icon, marker, tooltip) = if card.revealed {
             (Icon::Unlocked, &self.theme.icons.unlocked, "Уже открыто")
         } else {
@@ -834,36 +876,30 @@ impl BunkerApp {
         let marker = if marker.is_empty() { if card.revealed { "✓" } else { "+" } } else { marker.as_str() };
         let button = self.artwork.button(icon, marker, 17.0).frame(false).truncate();
         egui::Frame::new().inner_margin(egui::Margin::symmetric(x, y)).show(ui, |ui| {
-            const LOCK_SIZE: f32 = 24.0;
-            let width = ui.available_width();
-            let gap = 8.0;
-            let label_width = (width * 0.42).max(1.0);
-            let value_width = (width - label_width - LOCK_SIZE - 2.0 * gap).max(1.0);
-            let label_job = egui::text::LayoutJob::simple(
-                name.to_owned(), FontWeight::Medium.font(size), self.theme.palette.text.color(), label_width,
-            );
-            let mut value_job = egui::text::LayoutJob::simple(
-                card.value.clone(), FontWeight::SemiBold.font(size), self.theme.palette.accent_title.color(), value_width,
-            );
-            value_job.halign = egui::Align::RIGHT;
-            let (label, value) = ui.fonts_mut(|fonts| (fonts.layout_job(label_job), fonts.layout_job(value_job)));
-            let height = label.size().y.max(value.size().y).max(LOCK_SIZE);
-            let (row, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+            let (row, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::hover());
             let middle = row.center().y;
+            let lock_rect = egui::Rect::from_center_size(
+                egui::pos2(row.right() - DOSSIER_LOCK_SIZE / 2.0, middle), egui::Vec2::splat(DOSSIER_LOCK_SIZE),
+            );
+            let mut value_right = lock_rect.left() - DOSSIER_GAP;
+            if let Some(description) = description {
+                let center = egui::pos2(value_right - DOSSIER_INFO_SIZE / 2.0, middle);
+                let rect = egui::Rect::from_center_size(center, egui::Vec2::splat(DOSSIER_INFO_SIZE));
+                let color = self.theme.palette.accent_title.color();
+                ui.painter().circle_stroke(center, DOSSIER_INFO_SIZE / 2.0 - 1.0, Stroke::new(1.0_f32, color));
+                ui.painter().text(center, egui::Align2::CENTER_CENTER, "!", FontWeight::Bold.font(11.0), color);
+                ui.interact(rect, ui.next_auto_id().with("description"), egui::Sense::hover()).on_hover_text(description);
+                value_right = rect.left() - DOSSIER_GAP;
+            }
             let name_rect = egui::Rect::from_min_size(
                 egui::pos2(row.left(), middle - label.size().y / 2.0), label.size(),
             );
-            let lock_rect = egui::Rect::from_center_size(
-                egui::pos2(row.right() - LOCK_SIZE / 2.0, middle), egui::Vec2::splat(LOCK_SIZE),
-            );
             let value_rect = egui::Rect::from_min_size(
-                egui::pos2(lock_rect.left() - gap - value.size().x, middle - value.size().y / 2.0), value.size(),
+                egui::pos2(value_right - value.size().x, middle - value.size().y / 2.0), value.size(),
             );
             ui.place(name_rect, egui::Label::new(label));
-            ui.place(value_rect, egui::Label::new(value)).on_hover_text(&card.value);
-            let button = ui.place(lock_rect, |ui: &mut egui::Ui| {
-                ui.add_enabled(active && !card.revealed, button)
-            });
+            ui.place(value_rect, egui::Label::new(value));
+            let button = ui.place(lock_rect, |ui: &mut egui::Ui| ui.add_enabled(active && !card.revealed, button));
             if button.on_hover_text(tooltip).on_disabled_hover_text(tooltip).clicked() {
                 self.send(json!({"type":"reveal","kind":card.kind}));
             }
@@ -890,28 +926,30 @@ impl BunkerApp {
         ui.add_space(self.theme.spacing.heading_gap);
         let keys = ["gender", "body", "personality", "profession", "health", "hobby", "fear", "equipment", "backpack", "fact"];
         self.player_table(ui, room, "player-matrix", &keys, self.layout.players_cell_size);
-        ui.add_space(self.theme.spacing.heading_gap);
+        ui.add_space(TABLE_BOTTOM_GAP);
     }
 
     fn abilities_section(&mut self, ui: &mut egui::Ui, room: &Room) {
         ui.add_space(30.0);
         heading(ui, &self.theme, "Таблица спец. возможностей");
         self.player_table(ui, room, "ability-matrix", &["ability", "ability2"], self.layout.abilities_cell_size);
-        ui.add_space(self.theme.spacing.heading_gap);
+        ui.add_space(TABLE_BOTTOM_GAP);
     }
 
     fn player_table(&mut self, ui: &mut egui::Ui, room: &Room, id: &str, keys: &[&str], cell: [f32; 2]) {
         let host = room.you == room.host_id;
-        let player_width = 130.0;
-        let width = player_width + keys.len() as f32 * cell[0];
-        let offset = ((ui.available_width() - width) * 0.5).max(0.0);
+        let body_width = game_body_width(ui.available_width());
+        let scale = (body_width / (130.0 + keys.len() as f32 * cell[0])).max(0.82);
+        let player_width = 130.0 * scale;
+        let cell = [cell[0] * scale, cell[1] * scale];
+        let header_height = 36.0 * scale;
+        let header_size = self.theme.fonts.table_heading * scale;
+        let text_size = self.theme.fonts.table_body * scale;
         let line = self.theme.palette.button.color();
-        egui::ScrollArea::horizontal().id_salt(id).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                ui.add_space(offset);
+        ui.vertical_centered(|ui| {
+            egui::ScrollArea::horizontal().id_salt(id).max_width(body_width).auto_shrink([false, true]).show(ui, |ui| {
                 egui::Grid::new(id).spacing([0.0, 0.0]).show(ui, |ui| {
-                    ui.add_sized([player_width, 36.0], egui::Label::new(FontWeight::SemiBold.text(self.theme.fonts.table_heading, "Игрок")));
+                    ui.add_sized([player_width, header_height], egui::Label::new(FontWeight::SemiBold.text(header_size, "Игрок")));
                     for &kind in keys {
                         let name = room.category_labels.get(kind).map(String::as_str).unwrap_or_else(|| category_name(kind));
                         let name = if kind == "fact" && name == "Дополнительное сведение" {
@@ -919,37 +957,60 @@ impl BunkerApp {
                         } else {
                             name
                         };
-                        ui.add_sized([cell[0], 36.0], egui::Label::new(FontWeight::SemiBold.text(self.theme.fonts.table_heading, name)).wrap());
+                        ui.add_sized([cell[0], header_height], egui::Label::new(FontWeight::SemiBold.text(header_size, name)).wrap());
                     }
-                    ui.end_row();
                     for player in &room.players {
+                        ui.end_row();
                         table_cell(ui, [player_width, cell[1]], line, |ui| {
-                            self.avatar_widget(ui, player.avatar, false, (cell[1] - 8.0).min(35.0));
-                            ui.vertical(|ui| {
-                                ui.add(egui::Label::new(FontWeight::Medium.text(self.theme.fonts.table_body, &player.name)).truncate());
-                                let color = if player.active { self.theme.palette.muted.color() } else { self.theme.palette.negative.color() };
-                                ui.label(FontWeight::Medium.text(self.theme.fonts.table_body, if player.active { "Участник" } else { "Выбыл" }).color(color));
-                            });
+                            let avatar_size = (35.0 * scale).min(ui.available_height());
+                            self.avatar_widget(ui, player.avatar, false, avatar_size);
+                            let rect = ui.max_rect();
+                            let left = ui.next_widget_position().x;
+                            let width = (rect.right() - left).max(1.0);
+                            let label_height = text_size * 1.45;
+                            let name_rect = egui::Rect::from_min_size(
+                                egui::pos2(left, rect.center().y - label_height / 2.0),
+                                egui::vec2(width, label_height),
+                            );
+                            let mut name_ui = ui.new_child(egui::UiBuilder::new().max_rect(name_rect)
+                                .layout(egui::Layout::left_to_right(egui::Align::Center)));
+                            name_ui.add(egui::Label::new(FontWeight::Medium.text(text_size, &player.name)).truncate())
+                                .on_hover_text(&player.name);
+                            let action_rect = name_rect.translate(egui::vec2(0.0, label_height));
+                            let mut action_ui = ui.new_child(egui::UiBuilder::new().max_rect(action_rect)
+                                .layout(egui::Layout::left_to_right(egui::Align::Center)));
+                            if host && player.id != room.host_id {
+                                let (label, color) = if player.active {
+                                    ("Выгнать", self.theme.palette.negative.color())
+                                } else {
+                                    ("Вернуть", self.theme.palette.positive.color())
+                                };
+                                let action = egui::Button::new(FontWeight::Medium.text(text_size, label).color(color)).frame(false);
+                                if action_ui.add(action).clicked() {
+                                    self.send(json!({"type":"set_active","playerId":player.id,"active":!player.active}));
+                                }
+                            } else if !player.active {
+                                action_ui.label(FontWeight::Medium.text(text_size, "Выбыл").color(self.theme.palette.negative.color()));
+                            }
                         });
                         for &kind in keys {
                             let card = player.revealed_card(kind);
                             table_cell(ui, cell, line, |ui| {
                                 if host {
-                                    let icon = self.artwork.button(Icon::Edit, &self.theme.icons.edit, 13.0).frame(false);
+                                    let icon = self.artwork.button(Icon::Edit, &self.theme.icons.edit, 13.0 * scale).frame(false);
                                     if ui.add(icon).on_hover_text("Изменить карточку").clicked() {
                                         self.edit_card(&player.id, kind, card.map(|card| card.value.as_str()).unwrap_or(""));
                                     }
                                 }
                                 if let Some(card) = card {
-                                    ui.add(egui::Label::new(FontWeight::Medium.text(self.theme.fonts.table_body, card_text(&card.value))).wrap()).on_hover_text(&card.value);
-                                } else if let Some(icon) = self.artwork.icon(Icon::Locked, 12.0) {
+                                    ui.add(egui::Label::new(FontWeight::Medium.text(text_size, card_text(&card.value))).wrap()).on_hover_text(&card.value);
+                                } else if let Some(icon) = self.artwork.icon(Icon::Locked, 12.0 * scale) {
                                     ui.add(icon).on_hover_text("Закрыто");
                                 } else {
-                                    ui.label(FontWeight::Medium.text(self.theme.fonts.table_body, "Закрыто"));
+                                    ui.label(FontWeight::Medium.text(text_size, "Закрыто"));
                                 }
                             });
                         }
-                        ui.end_row();
                     }
                 });
             });

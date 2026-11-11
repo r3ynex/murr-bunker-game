@@ -69,6 +69,7 @@ test("age, height, descriptions, custom categories and scenario render", () => {
   assert.equal(drawCard(pack, "body").value, "Подвижный\n170 см");
   assert.equal(drawCard(pack, "profession").value, "Штурман (Эксперт)\nЧитает карты");
   assert.equal(drawCard(pack, "hobby").value, "Садоводство (Любитель)");
+  assert.equal(drawCard(pack, "profession").description, "Читает карты");
   assert.equal(pack.categories.relic[0].tags[0], "редкость");
   const scenario = drawScenario(pack);
   assert.ok(scenario.catastrophe.includes("Связь нестабильна"));

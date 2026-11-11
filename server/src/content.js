@@ -304,7 +304,8 @@ export function drawCard(pack, kind) {
     details.push(randomInt(entry.height1, entry.height2) + " см");
   }
   const title = entry.stage ? entry.title + " (" + entry.stage + ")" : entry.title;
-  return { kind, value: [title, ...details, entry.description].filter(Boolean).join("\n"), revealed: false };
+  return { kind, value: [title, ...details, entry.description].filter(Boolean).join("\n"),
+    revealed: false, description: entry.description ?? "" };
 }
 export function drawScenario(pack) {
   const catastrophe = formatted(pickEntry(pack.catastrophes));

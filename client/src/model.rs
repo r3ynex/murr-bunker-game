@@ -61,6 +61,47 @@ pub struct Card {
     #[serde(deserialize_with = "deserialize_card_value")]
     pub value: String,
     pub revealed: bool,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+impl Card {
+    pub fn dossier_text(&self) -> (&str, Option<&str>) {
+        if let Some(description) = &self.description {
+            if description.is_empty() {
+                return (&self.value, None);
+            }
+            let summary = self
+                .value
+                .strip_suffix(description.as_str())
+                .and_then(|prefix| prefix.strip_suffix('\n'))
+                .unwrap_or(&self.value);
+            return (summary, Some(description));
+        }
+
+        // Older room snapshots append the description after the title and optional age/height.
+        let Some((title, rest)) = self.value.split_once('\n') else {
+            return (&self.value, None);
+        };
+        let summary_end = if matches!(self.kind.as_str(), "gender" | "body")
+            && is_card_measurement(rest.lines().next().unwrap_or_default())
+        {
+            title.len() + 1 + rest.lines().next().unwrap_or_default().len()
+        } else {
+            title.len()
+        };
+        let description = self
+            .value
+            .get(summary_end + 1..)
+            .filter(|s| !s.trim().is_empty());
+        (&self.value[..summary_end], description)
+    }
+}
+
+fn is_card_measurement(line: &str) -> bool {
+    line.strip_suffix(" лет")
+        .or_else(|| line.strip_suffix(" см"))
+        .is_some_and(|number| number.parse::<u32>().is_ok())
 }
 
 fn deserialize_card_value<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -74,11 +115,7 @@ where
         return Ok(value);
     };
     let mut rest: Vec<_> = lines.collect();
-    let index = usize::from(rest.first().is_some_and(|line| {
-        line.strip_suffix(" лет")
-            .or_else(|| line.strip_suffix(" см"))
-            .is_some_and(|number| number.parse::<u32>().is_ok())
-    }));
+    let index = usize::from(rest.first().is_some_and(|line| is_card_measurement(line)));
     let prefixes = ["Уровень/примечание: ", "Стаж: ", "Степень: "];
     let Some(stage) = rest.get(index).copied().and_then(|line| {
         prefixes
@@ -160,6 +197,25 @@ mod tests {
             "kind": "hobby", "value": "Садоводство\nУровень/примечание: Любитель\nЗнает сорта", "revealed": true
         })).unwrap();
         assert_eq!(card.value, "Садоводство (Любитель)\nЗнает сорта");
+    }
+
+    #[test]
+    fn dossier_separates_description_and_keeps_age() {
+        let legacy: Card = serde_json::from_value(serde_json::json!({
+            "kind": "gender", "value": "Мужчина\n37 лет\nОписание", "revealed": false
+        }))
+        .unwrap();
+        assert_eq!(legacy.dossier_text(), ("Мужчина\n37 лет", Some("Описание")));
+
+        let current: Card = serde_json::from_value(serde_json::json!({
+            "kind": "profession", "value": "Генерал Воитель (Профессионал)\nМеч и доспехи",
+            "description": "Меч и доспехи", "revealed": true
+        }))
+        .unwrap();
+        assert_eq!(
+            current.dossier_text(),
+            ("Генерал Воитель (Профессионал)", Some("Меч и доспехи"))
+        );
     }
 
     #[test]
