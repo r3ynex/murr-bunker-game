@@ -49,15 +49,52 @@ pub struct Player {
 
 impl Player {
     pub fn revealed_card(&self, kind: &str) -> Option<&Card> {
-        self.cards.iter().find(|card| card.kind == kind && card.revealed)
+        self.cards
+            .iter()
+            .find(|card| card.kind == kind && card.revealed)
     }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Card {
     pub kind: String,
+    #[serde(deserialize_with = "deserialize_card_value")]
     pub value: String,
     pub revealed: bool,
+}
+
+fn deserialize_card_value<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    // Older workers send a generated stage as a separate labeled line.
+    let mut lines = value.lines();
+    let Some(title) = lines.next() else {
+        return Ok(value);
+    };
+    let mut rest: Vec<_> = lines.collect();
+    let index = usize::from(rest.first().is_some_and(|line| {
+        line.strip_suffix(" лет")
+            .or_else(|| line.strip_suffix(" см"))
+            .is_some_and(|number| number.parse::<u32>().is_ok())
+    }));
+    let prefixes = ["Уровень/примечание: ", "Стаж: ", "Степень: "];
+    let Some(stage) = rest.get(index).copied().and_then(|line| {
+        prefixes
+            .iter()
+            .find_map(|&prefix| line.strip_prefix(prefix))
+            .filter(|stage| !stage.is_empty())
+    }) else {
+        return Ok(value);
+    };
+    rest.remove(index);
+    let mut compact = format!("{title} ({stage})");
+    for line in rest {
+        compact.push('\n');
+        compact.push_str(line);
+    }
+    Ok(compact)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -82,7 +119,9 @@ pub struct BundleInfo {
     pub background: Option<String>,
 }
 
-fn default_avatar() -> u8 { 1 }
+fn default_avatar() -> u8 {
+    1
+}
 
 impl Default for LocalConfig {
     fn default() -> Self {
@@ -116,6 +155,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_stage_is_shown_in_parentheses() {
+        let card: Card = serde_json::from_value(serde_json::json!({
+            "kind": "hobby", "value": "Садоводство\nУровень/примечание: Любитель\nЗнает сорта", "revealed": true
+        })).unwrap();
+        assert_eq!(card.value, "Садоводство (Любитель)\nЗнает сорта");
+    }
+
+    #[test]
     fn public_tables_hide_own_unrevealed_cards() {
         let player: Player = serde_json::from_value(serde_json::json!({
             "id": "me", "name": "Player", "active": true,
@@ -124,7 +171,8 @@ mod tests {
                 {"kind": "ability", "value": "Repair", "revealed": true},
                 {"kind": "ability2", "value": "Trade", "revealed": false}
             ]
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(player.revealed_card("profession").is_none());
         assert!(player.revealed_card("ability2").is_none());
         assert_eq!(player.revealed_card("ability").unwrap().value, "Repair");

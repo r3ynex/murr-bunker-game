@@ -60,7 +60,7 @@ fn load_avatar_images(ctx: &egui::Context) -> Vec<Option<egui::TextureHandle>> {
                     egui::ColorImage::from_rgba_unmultiplied(
                         [width as usize, height as usize], img.as_raw()
                     ),
-                    egui::TextureOptions::LINEAR,
+                    egui::TextureOptions::LINEAR.with_mipmap_mode(Some(egui::TextureFilter::Linear)),
                 );
                 return Some(texture);
             }
@@ -510,11 +510,7 @@ impl BunkerApp {
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0u8, avatar_color(avatar).gamma_multiply(0.55));
         if let Some(texture) = self.avatar_images.get(avatar.saturating_sub(1) as usize).and_then(Option::as_ref) {
-            painter.image(
-                texture.id(), rect.shrink(2.0),
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
+            paint_cover(&painter, texture, rect.shrink(2.0));
         } else {
             painter.text(
                 rect.center(), egui::Align2::CENTER_CENTER, avatar_symbol(avatar),
@@ -828,31 +824,49 @@ impl BunkerApp {
 
     fn dossier_card(&mut self, ui: &mut egui::Ui, room: &Room, card: &Card, active: bool) {
         let [x, y] = self.layout.dossier_padding;
-        let text = self.theme.palette.text.color();
-        let accent = self.theme.palette.accent_title.color();
         let size = self.theme.fonts.dossier;
         let name = room.category_labels.get(&card.kind).map(String::as_str).unwrap_or_else(|| category_name(&card.kind));
+        let (icon, marker, tooltip) = if card.revealed {
+            (Icon::Unlocked, &self.theme.icons.unlocked, "Уже открыто")
+        } else {
+            (Icon::Locked, &self.theme.icons.locked, "Открыть карту всем игрокам")
+        };
+        let marker = if marker.is_empty() { if card.revealed { "✓" } else { "+" } } else { marker.as_str() };
+        let button = self.artwork.button(icon, marker, 17.0).frame(false).truncate();
         egui::Frame::new().inner_margin(egui::Margin::symmetric(x, y)).show(ui, |ui| {
-            ui.horizontal_top(|ui| {
-                let label_width = ui.available_width() * 0.42;
-                ui.add_sized([label_width, 0.0], egui::Label::new(FontWeight::Medium.text(size, name).color(text)).wrap());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                    let (icon, marker, tooltip) = if card.revealed {
-                        (Icon::Unlocked, &self.theme.icons.unlocked, "Уже открыто")
-                    } else {
-                        (Icon::Locked, &self.theme.icons.locked, "Открыть карту всем игрокам")
-                    };
-                    let marker = if marker.is_empty() { "Открыть" } else { marker.as_str() };
-                    let button = self.artwork.button(icon, marker, 17.0).frame(false);
-                    if ui.add_enabled(active && !card.revealed, button).on_hover_text(tooltip).clicked() {
-                        self.send(json!({"type":"reveal","kind":card.kind}));
-                    }
-                    let width = ui.available_width().max(0.0);
-                    ui.add_sized([width, 0.0],
-                        egui::Label::new(FontWeight::SemiBold.text(size, &card.value).color(accent)).wrap())
-                        .on_hover_text(&card.value);
-                });
+            const LOCK_SIZE: f32 = 24.0;
+            let width = ui.available_width();
+            let gap = 8.0;
+            let label_width = (width * 0.42).max(1.0);
+            let value_width = (width - label_width - LOCK_SIZE - 2.0 * gap).max(1.0);
+            let label_job = egui::text::LayoutJob::simple(
+                name.to_owned(), FontWeight::Medium.font(size), self.theme.palette.text.color(), label_width,
+            );
+            let mut value_job = egui::text::LayoutJob::simple(
+                card.value.clone(), FontWeight::SemiBold.font(size), self.theme.palette.accent_title.color(), value_width,
+            );
+            value_job.halign = egui::Align::RIGHT;
+            let (label, value) = ui.fonts_mut(|fonts| (fonts.layout_job(label_job), fonts.layout_job(value_job)));
+            let height = label.size().y.max(value.size().y).max(LOCK_SIZE);
+            let (row, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+            let middle = row.center().y;
+            let name_rect = egui::Rect::from_min_size(
+                egui::pos2(row.left(), middle - label.size().y / 2.0), label.size(),
+            );
+            let lock_rect = egui::Rect::from_center_size(
+                egui::pos2(row.right() - LOCK_SIZE / 2.0, middle), egui::Vec2::splat(LOCK_SIZE),
+            );
+            let value_rect = egui::Rect::from_min_size(
+                egui::pos2(lock_rect.left() - gap - value.size().x, middle - value.size().y / 2.0), value.size(),
+            );
+            ui.place(name_rect, egui::Label::new(label));
+            ui.place(value_rect, egui::Label::new(value)).on_hover_text(&card.value);
+            let button = ui.place(lock_rect, |ui: &mut egui::Ui| {
+                ui.add_enabled(active && !card.revealed, button)
             });
+            if button.on_hover_text(tooltip).on_disabled_hover_text(tooltip).clicked() {
+                self.send(json!({"type":"reveal","kind":card.kind}));
+            }
         });
     }
 
@@ -1084,7 +1098,7 @@ impl BunkerApp {
                 .min_width(self.layout.dialog_width).default_width(self.layout.dialog_width).show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.label(FontWeight::Bold.text(self.theme.fonts.body, "Набор карт"));
-                    ui.label(if self.pack_file.is_empty() { "Murr: стартовый набор" } else { &self.pack_file });
+                    ui.label(if self.pack_file.is_empty() { "Бункер 6" } else { &self.pack_file });
                     if ui.button("Выбрать JSON / ZIP-пак…").clicked() { self.pick_pack(); }
                     ui.label(RichText::new("ZIP: pack.json и изображения в assets/. Раздаётся остальным автоматически.").color(self.theme.palette.muted.color()).size(self.theme.fonts.small));
                     ui.separator();

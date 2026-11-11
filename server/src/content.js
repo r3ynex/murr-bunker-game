@@ -1,5 +1,7 @@
 // Murr Pack v2: compact, data-only bundles produced from editable pack folders.
 // No user content is evaluated as code. Legacy v1 and Bunker Online exports remain importable.
+import basePack from "../../client/packs/demo.json" with { type: "json" };
+
 export const CATEGORIES = [
   "gender", "body", "personality", "profession", "health", "hobby",
   "fear", "equipment", "backpack", "fact", "ability"
@@ -274,7 +276,7 @@ export function normalizePack(source) {
     catastrophes, bunker
   };
 }
-export const DEFAULT_PACK = normalizePack(DEFAULT_INPUT);
+export const DEFAULT_PACK = normalizePack(basePack);
 
 const randomFraction = () => crypto.getRandomValues(new Uint32Array(1))[0] / 4294967296;
 export function pickEntry(entries) {
@@ -301,11 +303,8 @@ export function drawCard(pack, kind) {
   if (kind === "body" && entry.height1 !== undefined) {
     details.push(randomInt(entry.height1, entry.height2) + " см");
   }
-  if (entry.stage) {
-    const label = kind === "profession" ? "Стаж" : kind === "health" ? "Степень" : "Уровень/примечание";
-    details.push(label + ": " + entry.stage);
-  }
-  return { kind, value: [entry.title, ...details, entry.description].filter(Boolean).join("\n"), revealed: false };
+  const title = entry.stage ? entry.title + " (" + entry.stage + ")" : entry.title;
+  return { kind, value: [title, ...details, entry.description].filter(Boolean).join("\n"), revealed: false };
 }
 export function drawScenario(pack) {
   const catastrophe = formatted(pickEntry(pack.catastrophes));
