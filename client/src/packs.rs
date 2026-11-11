@@ -6,7 +6,15 @@ use std::fs::{self, File};
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
-pub const BASE: &str = include_str!("../packs/demo.json");
+pub const BASE: &str = include_str!("../../packs/bunker-6.json");
+const BUILTIN: [(&str, &str); 3] = [
+    ("bunker-6", BASE),
+    ("bunker-4", include_str!("../../packs/bunker-4.json")),
+    (
+        "bunker-space",
+        include_str!("../../packs/bunker-space.json"),
+    ),
+];
 const MAX_JSON: u64 = 500_000;
 const MAX_ZIP: u64 = 2_000_000;
 const MAX_UNPACKED: u64 = 6_000_000;
@@ -15,6 +23,8 @@ const MAX_PACKS: usize = 24;
 #[derive(Deserialize, Serialize)]
 struct Selection {
     path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    builtin: Option<String>,
     active: bool,
 }
 
@@ -48,14 +58,24 @@ impl Entry {
         self.selection.active = !self.selection.active;
     }
     pub fn reload(&mut self) {
-        self.data = Self::read(self.selection.path.as_deref());
+        self.data = Self::read(
+            self.selection.path.as_deref(),
+            self.selection.builtin.as_deref(),
+        );
     }
 
-    fn read(path: Option<&Path>) -> Result<Pack, String> {
+    fn read(path: Option<&Path>, builtin: Option<&str>) -> Result<Pack, String> {
         match path {
             Some(path) => Pack::load(path),
             None => Ok(Pack {
-                json: serde_json::from_str(BASE).expect("valid base pack"),
+                json: serde_json::from_str(
+                    BUILTIN
+                        .iter()
+                        .find(|(key, _)| *key == builtin.unwrap_or("bunker-6"))
+                        .map(|(_, source)| *source)
+                        .unwrap_or(BASE),
+                )
+                .expect("valid bundled pack"),
                 assets: BTreeMap::new(),
             }),
         }
@@ -67,21 +87,31 @@ pub fn library() -> Vec<Entry> {
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Vec<Selection>>(&bytes).ok())
         .unwrap_or_default();
-    let base_active = saved
+    let builtins: Vec<_> = BUILTIN
         .iter()
-        .find(|entry| entry.path.is_none())
-        .is_none_or(|entry| entry.active);
-    std::iter::once(Selection {
-        path: None,
-        active: base_active,
-    })
-    .chain(saved.into_iter().filter(|entry| entry.path.is_some()))
-    .take(MAX_PACKS)
-    .map(|selection| Entry {
-        data: Entry::read(selection.path.as_deref()),
-        selection,
-    })
-    .collect()
+        .map(|(id, _)| {
+            let active = saved
+                .iter()
+                .find(|entry| {
+                    entry.path.is_none() && entry.builtin.as_deref().unwrap_or("bunker-6") == *id
+                })
+                .map_or(*id == "bunker-6", |entry| entry.active);
+            Selection {
+                path: None,
+                builtin: Some((*id).to_owned()),
+                active,
+            }
+        })
+        .collect();
+    builtins
+        .into_iter()
+        .chain(saved.into_iter().filter(|entry| entry.path.is_some()))
+        .take(MAX_PACKS)
+        .map(|selection| Entry {
+            data: Entry::read(selection.path.as_deref(), selection.builtin.as_deref()),
+            selection,
+        })
+        .collect()
 }
 
 pub fn save_library(entries: &[Entry]) -> Result<(), String> {
@@ -106,6 +136,7 @@ pub fn add(entries: &mut Vec<Entry>, path: &Path) -> Result<(), String> {
         entries.push(Entry {
             selection: Selection {
                 path: Some(path),
+                builtin: None,
                 active: true,
             },
             data: Ok(data),
@@ -497,7 +528,7 @@ mod tests {
 
     #[test]
     fn combines_cards_and_keeps_each_catastrophe_image_with_its_pack() {
-        let mut base = Entry::read(None).unwrap();
+        let mut base = Entry::read(None, None).unwrap();
         base.assets.insert("assets/catastrophe.png".into(), vec![1]);
         let extra = Pack {
             json: json!({"spec":{"data":[{"title":"Test ability"}]},"profession":{"data":[{"title":"Test profession","stage":"Expert"}]},"catastrophe":{"data":[{"title":"Test scenario","image":"storm.jpg"},{"title":"No image","image":"absent.png"}]}}),
