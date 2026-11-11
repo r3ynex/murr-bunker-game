@@ -52,6 +52,24 @@ fn configure_ui(ctx: &egui::Context) {
             candidates.insert(0, dir.join(filename));
         }
     }
+    // Optional: the user can place their own Manrope.zip next to the exe.
+    // Fonts are loaded in memory and are never bundled or redistributed.
+    let external_zip_font = fs::read(portable_path("Manrope.zip")).ok().and_then(|zip_bytes| {
+        let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).ok()?;
+        let mut font = archive.by_name("static/Manrope-Regular.ttf").ok()?;
+        if font.size() > 250_000 { return None; }
+        let mut data = Vec::new();
+        font.read_to_end(&mut data).ok()?;
+        Some(data)
+    });
+    if let Some(data) = external_zip_font {
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert("Manrope".into(), egui::FontData::from_owned(data).into());
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts.families.entry(family).or_default().insert(0, "Manrope".into());
+        }
+        ctx.set_fonts(fonts);
+    } else {
     for path in candidates {
         if let Ok(data) = fs::read(path) {
             let mut fonts = egui::FontDefinitions::default();
@@ -62,6 +80,7 @@ fn configure_ui(ctx: &egui::Context) {
             ctx.set_fonts(fonts);
             break;
         }
+    }
     }
     let mut style = (*ctx.style()).clone();
     style.visuals = egui::Visuals::dark();
