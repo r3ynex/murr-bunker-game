@@ -36,6 +36,10 @@ pub struct Player {
     pub id: String,
     pub name: String,
     pub active: bool,
+    #[serde(default)]
+    pub ready: bool,
+    #[serde(default)]
+    pub avatar_id: usize,
     pub cards: Vec<Card>,
 }
 
@@ -56,13 +60,19 @@ pub struct VoteResult {
 pub struct LocalConfig {
     pub server_url: String,
     pub nickname: String,
+    #[serde(default)]
+    pub avatar_id: usize,
+    #[serde(default)]
+    pub profile_complete: bool,
 }
 
 impl Default for LocalConfig {
     fn default() -> Self {
         Self {
             server_url: "http://127.0.0.1:8787".to_owned(),
-            nickname: "Игрок".to_owned(),
+            nickname: String::new(),
+            avatar_id: 0,
+            profile_complete: false,
         }
     }
 }
