@@ -688,7 +688,22 @@ impl BunkerApp {
 
     fn hero(&mut self, ui: &mut egui::Ui, room: &Room) {
         let width = ui.available_width();
-        let height = self.layout.hero_height;
+        let [horizontal_inset, vertical_inset] = self.layout.hero_inset;
+        let text_width = self.layout.hero_text_size[0].min((width - 2.0 * horizontal_inset).max(1.0));
+        let color = self.theme.palette.text.color();
+        let survivors = room.players.iter().filter(|player| player.active).count();
+        let text = [
+            ("Катаклизм".to_owned(), FontWeight::Bold.font(self.theme.fonts.heading)),
+            (room.catastrophe.clone(), FontWeight::Regular.font(self.theme.fonts.hero_body)),
+            (format!("Раунд {} · Выживших: {survivors}", room.round), FontWeight::Regular.font(self.theme.fonts.hero_body)),
+        ].map(|(text, font)| {
+            let mut job = egui::text::LayoutJob::simple(text, font, color, text_width);
+            job.halign = egui::Align::Center;
+            ui.fonts_mut(|fonts| fonts.layout_job(job))
+        });
+        let gap = 30.0;
+        let group_height = text.iter().map(|galley| galley.size().y).sum::<f32>() + 2.0 * gap;
+        let height = self.layout.hero_height.max(group_height + 2.0 * vertical_inset);
         let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0u8, self.theme.palette.hero.color());
@@ -698,23 +713,15 @@ impl BunkerApp {
         } else if let Some(texture) = &self.artwork.catastrophe {
             paint_cover(&painter, texture, rect);
         }
-        let inset = self.layout.hero_inset;
-        let text_width = self.layout.hero_text_size[0].min((width - 2.0 * inset[0]).max(80.0));
-        let text_rect = egui::Rect::from_min_size(
-            egui::pos2(rect.center().x - 0.5 * text_width, rect.top() + self.layout.hero_top_gap + inset[1]),
-            egui::vec2(text_width, (height - self.layout.hero_top_gap - inset[1]).max(80.0)),
-        );
-        let mut text = ui.new_child(egui::UiBuilder::new().max_rect(text_rect));
-        text.set_clip_rect(rect.intersect(ui.clip_rect()));
-        text.vertical_centered(|ui| {
-            ui.label(FontWeight::Bold.text(self.theme.fonts.heading, "Катаклизм"));
-            ui.add_space(30.0);
-            let description = egui::Label::new(FontWeight::Regular.text(self.theme.fonts.hero_body, &room.catastrophe)).wrap();
-            egui::ScrollArea::vertical().id_salt("catastrophe-description").max_height(self.layout.hero_text_size[1])
-                .show(ui, |ui| { ui.add(description); });
-            ui.add_space(30.0);
-            ui.label(FontWeight::Regular.text(self.theme.fonts.hero_body, format!("Раунд {} · Выживших: {}", room.round, room.players.iter().filter(|p| p.active).count())));
-        });
+
+        let center = rect.center();
+        let mut y = center.y - group_height / 2.0;
+        for galley in text {
+            let size = galley.size();
+            let text_rect = egui::Rect::from_min_size(egui::pos2(center.x - size.x / 2.0, y), size);
+            ui.place(text_rect, egui::Label::new(galley));
+            y += size.y + gap;
+        }
     }
 
     fn game_navigation(&mut self, ctx: &egui::Context) {

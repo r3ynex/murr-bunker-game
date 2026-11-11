@@ -33,7 +33,7 @@
 - `content_margin`, `status_margin`, `panel_padding` — отступы основного экрана, всплывающего уведомления от нижнего края и панели бункера.
 - `menu_top_fraction` — доля высоты над главным меню (от 0 до 0,5). `welcome_name_width` — ширина поля ника. `dialog_width` — ширина диалога создания комнаты.
 - `lobby_columns`, `avatar_picker_columns`, `dossier_columns` — количество колонок. `lobby_avatar_size` и `avatar_picker_size` — размер аватаров.
-- `hero_height`, `hero_inset`, `hero_top_gap`, `hero_text_size` — высота блока катаклизма, поля, отступ сверху и размер области текста.
+- `hero_height` задаёт минимальную высоту блока катаклизма, `hero_inset` — поля, первый элемент `hero_text_size` — максимальную ширину текста. Длинное описание увеличивает высоту блока. `hero_top_gap` и второй элемент `hero_text_size` принимаются для совместимости со старыми файлами.
 - `dossier_padding` — внутренние отступы карточек. `players_cell_size` и `abilities_cell_size` — размеры ячеек двух игровых таблиц, обе прокручиваются по горизонтали.
 
 Размеры указаны в логических точках egui. `welcome_top_fraction` и `menu_top_fraction` задают вертикальное положение входа и меню. `entry_button_size` — сторона квадрата кнопки входа, `profile_avatar_size` — сторона аватара в меню, `menu_profile_gap` — расстояние от профиля до кнопок, `section_min_height` — базовая высота игровых секций.
