@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Duration;
 
-pub fn request_room(base_url: String, nickname: String, code: Option<String>) -> Receiver<Result<Session, String>> {
+pub fn request_room(base_url: String, nickname: String, avatar_id: usize, code: Option<String>) -> Receiver<Result<Session, String>> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let base = base_url.trim().trim_end_matches('/');
@@ -20,7 +20,7 @@ pub fn request_room(base_url: String, nickname: String, code: Option<String>) ->
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(12))
             .build();
-        let response = agent.post(&url).send_json(json!({ "name": nickname }));
+        let response = agent.post(&url).send_json(json!({ "name": nickname, "avatarId": avatar_id }));
         let result: Result<Session, String> = match response {
             Ok(resp) => resp.into_json::<Session>().map_err(|err| err.to_string()),
             Err(ureq::Error::Status(code, resp)) => {
