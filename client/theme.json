@@ -1,0 +1,59 @@
+{
+  "palette": {
+    "background": [3, 3, 3],
+    "panel": [19, 19, 19],
+    "surface": [19, 19, 19],
+    "status": [12, 12, 14],
+    "button": [61, 61, 61],
+    "hover": [79, 67, 53],
+    "pressed": [100, 71, 39],
+    "selection": [132, 87, 39],
+    "text": [245, 245, 245],
+    "muted": [156, 156, 164],
+    "accent": [236, 137, 21],
+    "accent_text": [3, 3, 3],
+    "positive": [67, 200, 120],
+    "negative": [239, 84, 90],
+    "hero": [23, 22, 20],
+    "outline": [90, 66, 43]
+  },
+  "fonts": {
+    "family": "manrope",
+    "file": null,
+    "body": 15,
+    "button": 15,
+    "small": 12,
+    "heading": 27,
+    "title": 33,
+    "icon": 20
+  },
+  "buttons": {
+    "accent_size": [155, 38],
+    "menu_size": [184, 52],
+    "navigation_size": [43, 38],
+    "padding": [8, 4],
+    "radius": 6
+  },
+  "spacing": {
+    "items": [9, 11],
+    "heading_gap": 10,
+    "section_gap": 30
+  },
+  "icons": {
+    "join": "",
+    "create": "",
+    "settings": "",
+    "host": "♛",
+    "locked": "🔒",
+    "unlocked": "🔓",
+    "edit": "⋯",
+    "navigation": [
+      "⚠",
+      "⌂",
+      "✧",
+      "▤",
+      "☷",
+      "★"
+    ]
+  }
+}

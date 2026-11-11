@@ -34,20 +34,21 @@ jobs:
         with:
           workspaces: client
 
-      - name: Check
+      - name: Test client
         working-directory: client
-        run: cargo check
+        run: cargo test
 
       - name: Build optimized portable EXE
         working-directory: client
         run: cargo build --release
 
-      - name: Bundle standalone executable and demo pack
+      - name: Bundle executable, demo pack and appearance settings
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item client/target/release/murr-bunker-game.exe dist/Murr-Bunker.exe
           Copy-Item client/packs/demo.json dist/pack-example.json
+          Copy-Item client/theme.json, client/layout.json, client/APPEARANCE.md -Destination dist
           # Copy any custom avatar artwork with the EXE; no user-specific images in source by default.
           if (Test-Path client/assets/avatars) {
             Copy-Item client/assets/avatars dist/avatars -Recurse -Force

@@ -1,0 +1,21 @@
+{
+  "window_size": [1280, 850],
+  "content_margin": 12,
+  "status_margin": 8,
+  "panel_padding": 18,
+  "menu_top_fraction": 0.18,
+  "welcome_name_width": 345,
+  "lobby_columns": 3,
+  "lobby_avatar_size": 47,
+  "avatar_picker_columns": 6,
+  "avatar_picker_size": 62,
+  "hero_height": 330,
+  "hero_inset": [44, 25],
+  "hero_top_gap": 45,
+  "hero_text_size": [950, 105],
+  "dossier_columns": 2,
+  "dossier_padding": [8, 6],
+  "players_cell_size": [140, 50],
+  "abilities_cell_size": [390, 45],
+  "dialog_width": 480
+}

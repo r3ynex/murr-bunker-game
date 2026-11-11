@@ -6,6 +6,7 @@ description = "Portable multiplayer Bunker game client"
 license = "MIT"
 
 [dependencies]
+ab_glyph = "0.2"
 eframe = { version = "0.33.3", default-features = false, features = ["glow", "default_fonts"] }
 ewebsock = "0.8.0"
 serde = { version = "1.0", features = ["derive"] }
