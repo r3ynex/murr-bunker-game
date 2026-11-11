@@ -1,5 +1,5 @@
 use crate::model::{category_name, Card, LocalConfig, Room, Session};
-use crate::appearance::{portable_path, with_icon, Layout, Theme};
+use crate::appearance::{portable_path, with_icon, FontWeight, Layout, Theme};
 use crate::artwork::{centered_row, flat_button, input_row, paint_cover, paint_gradient, table_cell, Artwork, Icon};
 use crate::network;
 use eframe::egui::{self, Color32, RichText, Stroke};
@@ -71,7 +71,7 @@ fn load_avatar_images(ctx: &egui::Context) -> Vec<Option<egui::TextureHandle>> {
 
 fn heading(ui: &mut egui::Ui, theme: &Theme, name: &str) {
     ui.vertical_centered(|ui| {
-        ui.add(egui::Label::new(RichText::new(name).size(theme.fonts.heading).strong()));
+        ui.add(egui::Label::new(FontWeight::Bold.text(theme.fonts.heading, name)));
     });
     ui.add_space(theme.spacing.heading_gap);
 }
@@ -81,6 +81,24 @@ fn section_rule(ui: &mut egui::Ui, theme: &Theme) {
     ui.painter().rect_filled(line, 0u8, theme.palette.outline.color());
     ui.add_space(theme.spacing.section_gap);
 }
+fn bunker_description(ui: &mut egui::Ui, text: &str, theme: &Theme) {
+    let size = theme.fonts.bunker_body;
+    for line in text.lines() {
+        let mut job = egui::text::LayoutJob::default();
+        let (label, value) = line.split_once(':').filter(|(label, _)| {
+            matches!(label, "Размер" | "Время проживания" | "Еда и вода" | "Внутри"
+                | "Размер бункера" | "Время нахождения" | "Количество еды и воды" | "В бункере присутствует")
+        }).map_or((None, line), |(label, value)| (Some(label), value));
+        if let Some(label) = label {
+            job.append(&format!("{label}:"), 0.0, egui::TextFormat::simple(
+                FontWeight::SemiBold.font(size), theme.palette.accent_title.color(),
+            ));
+        }
+        job.append(value, 0.0, egui::TextFormat::simple(FontWeight::Regular.font(size), theme.palette.text.color()));
+        ui.add(egui::Label::new(job).wrap());
+    }
+}
+
 fn card_text(text: &str) -> String {
     let trimmed = text.lines().next().unwrap_or("");
     let short: String = trimmed.chars().take(38).collect();
@@ -503,9 +521,9 @@ impl BunkerApp {
     fn ui_welcome(&mut self, ui: &mut egui::Ui) {
         ui.add_space(ui.available_height() * self.layout.welcome_top_fraction);
         ui.vertical_centered(|ui| {
-            ui.label(RichText::new("Добро пожаловать в Бункер!")
-                .size(self.theme.fonts.title).color(self.theme.palette.accent_title.color()).strong());
-            ui.label("Для старта выберите никнейм и аватар (только при первом запуске)");
+            ui.label(FontWeight::Bold.text(self.theme.fonts.title, "Добро пожаловать в Бункер!")
+                .color(self.theme.palette.accent_title.color()));
+            ui.label(FontWeight::Regular.text(self.theme.fonts.welcome_caption, "Для старта выберите никнейм и аватар (только при первом запуске)"));
             ui.add_space(24.0);
 
             let side = self.layout.entry_button_size;
@@ -517,7 +535,7 @@ impl BunkerApp {
                 {
                     self.show_avatar_picker = true;
                 }
-                let nickname = input_row(ui, &mut self.nickname, "Выживший #8549", field, side, self.theme.palette.input.color());
+                let nickname = input_row(ui, &mut self.nickname, "Выживший #8549", field, side, self.theme.palette.input.color(), FontWeight::SemiBold.font(self.theme.fonts.input));
                 let button = self.artwork.button(Icon::Login, "→", self.theme.fonts.icon);
                 let submit = flat_button(ui, [side; 2], button, self.theme.accent_gradient(), self.theme.buttons.radius)
                     .on_hover_text("Продолжить");
@@ -531,7 +549,7 @@ impl BunkerApp {
 
     fn ui_main_menu(&mut self, ui: &mut egui::Ui) {
         ui.add_space(ui.available_height() * self.layout.menu_top_fraction);
-        let font = egui::FontId::proportional(self.theme.fonts.heading);
+        let font = FontWeight::Bold.font(self.theme.fonts.profile_name);
         let name_width = ui.painter().layout_no_wrap(self.nickname.clone(), font, Color32::WHITE).size().x;
         let side = self.layout.profile_avatar_size;
         let gap = ui.spacing().item_spacing.x;
@@ -542,7 +560,7 @@ impl BunkerApp {
             {
                 self.show_avatar_picker = true;
             }
-            ui.add(egui::Label::new(RichText::new(&self.nickname).size(self.theme.fonts.heading).strong()).truncate());
+            ui.add(egui::Label::new(FontWeight::Bold.text(self.theme.fonts.profile_name, &self.nickname)).truncate());
         });
         ui.add_space(self.layout.menu_profile_gap);
 
@@ -574,8 +592,8 @@ impl BunkerApp {
         let height = ui.available_height();
         ui.add_space(0.10 * height);
         ui.vertical_centered(|ui| {
-            ui.label(RichText::new(format!("Лобби: {}", room.code)).size(self.theme.fonts.heading).strong());
-            ui.label(format!("Игроки: {} из 15", room.players.len())).on_hover_text(&room.pack_name);
+            ui.label(FontWeight::Bold.text(self.theme.fonts.lobby_heading, format!("Лобби: {}", room.code)));
+            ui.label(FontWeight::Medium.text(self.theme.fonts.lobby_count, format!("Игроки: {} из 15", room.players.len()))).on_hover_text(&room.pack_name);
         });
         ui.add_space(14.0);
 
@@ -613,7 +631,7 @@ impl BunkerApp {
                                 let (bar, _) = ui.allocate_exact_size(egui::vec2(4.0, side), egui::Sense::hover());
                                 ui.painter().rect_filled(bar, 0u8, color);
                                 self.avatar_widget(ui, player.avatar, false, side);
-                                ui.add(egui::Label::new(RichText::new(&player.name).size(self.theme.fonts.body).strong()).truncate());
+                                ui.add(egui::Label::new(FontWeight::Bold.text(self.theme.fonts.lobby_name, &player.name)).truncate());
                             });
                         }
                     });
@@ -628,7 +646,7 @@ impl BunkerApp {
             let neutral = [self.theme.palette.button.color(); 2];
             let radius = self.theme.buttons.radius;
             let side_size = [side_width, action_height * 0.8];
-            if flat_button(ui, side_size, egui::Button::new("Покинуть игру"), neutral, radius).clicked() {
+            if flat_button(ui, side_size, egui::Button::new(FontWeight::SemiBold.text(self.theme.fonts.lobby_side_button, "Покинуть игру")), neutral, radius).clicked() {
                 self.leave_room();
                 return;
             }
@@ -646,7 +664,7 @@ impl BunkerApp {
                 if host { self.send(json!({"type":"start"})); }
                 else { self.send(json!({"type":"set_ready","ready":!ready})); }
             }
-            if flat_button(ui, side_size, egui::Button::new("Настройки"), neutral, radius).clicked() {
+            if flat_button(ui, side_size, egui::Button::new(FontWeight::SemiBold.text(self.theme.fonts.lobby_side_button, "Настройки")), neutral, radius).clicked() {
                 self.show_host_tools = true;
             }
         });
@@ -686,13 +704,13 @@ impl BunkerApp {
         let mut text = ui.new_child(egui::UiBuilder::new().max_rect(text_rect));
         text.set_clip_rect(rect.intersect(ui.clip_rect()));
         text.vertical_centered(|ui| {
-            ui.label(RichText::new("Катаклизм").size(self.theme.fonts.heading).strong());
+            ui.label(FontWeight::Bold.text(self.theme.fonts.heading, "Катаклизм"));
             ui.add_space(30.0);
-            let description = egui::Label::new(&room.catastrophe).wrap();
+            let description = egui::Label::new(FontWeight::Regular.text(self.theme.fonts.hero_body, &room.catastrophe)).wrap();
             egui::ScrollArea::vertical().id_salt("catastrophe-description").max_height(self.layout.hero_text_size[1])
                 .show(ui, |ui| { ui.add(description); });
             ui.add_space(30.0);
-            ui.label(format!("Раунд {} · Выживших: {}", room.round, room.players.iter().filter(|p| p.active).count()));
+            ui.label(FontWeight::Regular.text(self.theme.fonts.hero_body, format!("Раунд {} · Выживших: {}", room.round, room.players.iter().filter(|p| p.active).count())));
         });
     }
 
@@ -741,13 +759,13 @@ impl BunkerApp {
         );
         let mut body = ui.new_child(egui::UiBuilder::new().max_rect(content));
         body.set_clip_rect(rect.intersect(ui.clip_rect()));
-        body.label(RichText::new("Информация о бункере").size(self.theme.fonts.heading).strong());
+        body.label(FontWeight::Bold.text(self.theme.fonts.heading, "Информация о бункере"));
         body.add_space(self.theme.spacing.heading_gap);
         egui::ScrollArea::vertical().id_salt("bunker-description").max_height(height * 0.45).show(&mut body, |ui| {
-            ui.add(egui::Label::new(&room.bunker).wrap());
+            bunker_description(ui, &room.bunker, &self.theme);
         });
         body.add_space(16.0);
-        body.label(RichText::new(format!("Количество мест: {}", room.seats)).size(self.theme.fonts.heading).strong());
+        body.label(FontWeight::Bold.text(self.theme.fonts.bunker_seats, format!("Количество мест: {}", room.seats)));
     }
 
     fn event_section(&mut self, ui: &mut egui::Ui, room: &Room) {
@@ -756,7 +774,7 @@ impl BunkerApp {
         ui.add_space(36.0);
         heading(ui, &self.theme, "События");
         ui.vertical_centered(|ui| {
-            ui.label(RichText::new("UNDER CONSTRUCTION").size(self.theme.fonts.heading).strong().color(self.theme.palette.negative.color()));
+            ui.label(FontWeight::Bold.text(self.theme.fonts.heading, "UNDER CONSTRUCTION").color(self.theme.palette.negative.color()));
             ui.label(RichText::new(format!("Шанс события: {}% · Реальные события пока не запускаются",
                 room.event_chance)).color(self.theme.palette.muted.color()));
         });
@@ -801,7 +819,7 @@ impl BunkerApp {
         let name = room.category_labels.get(&card.kind).map(String::as_str).unwrap_or_else(|| category_name(&card.kind));
         egui::Frame::new().inner_margin(egui::Margin::symmetric(x, y)).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(name).color(text).size(self.theme.fonts.small));
+                ui.label(FontWeight::Medium.text(self.theme.fonts.dossier, name).color(text));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let (icon, marker, tooltip) = if card.revealed {
                         (Icon::Unlocked, &self.theme.icons.unlocked, "Уже открыто")
@@ -813,7 +831,7 @@ impl BunkerApp {
                     if ui.add_enabled(active && !card.revealed, button).on_hover_text(tooltip).clicked() {
                         self.send(json!({"type":"reveal","kind":card.kind}));
                     }
-                    ui.add(egui::Label::new(RichText::new(&card.value).color(accent).size(self.theme.fonts.small)).wrap());
+                    ui.add(egui::Label::new(FontWeight::SemiBold.text(self.theme.fonts.dossier, &card.value).color(accent)).wrap());
                 });
             });
         });
@@ -830,7 +848,16 @@ impl BunkerApp {
         self.at_section(ui, 4);
         ui.add_space(30.0);
         let count = room.players.iter().filter(|p| p.active).count();
-        heading(ui, &self.theme, &format!("Желающие попасть в бункер: {}/{}", count, room.players.len()));
+        let mut heading = egui::text::LayoutJob::default();
+        let font = FontWeight::Bold.font(self.theme.fonts.heading);
+        heading.append("Желающие попасть в бункер: ", 0.0, egui::TextFormat::simple(
+            font.clone(), self.theme.palette.text.color(),
+        ));
+        heading.append(&format!("{count}/{}", room.players.len()), 0.0, egui::TextFormat::simple(
+            font, self.theme.palette.accent_title.color(),
+        ));
+        ui.vertical_centered(|ui| { ui.add(egui::Label::new(heading)); });
+        ui.add_space(self.theme.spacing.heading_gap);
         let keys = ["gender", "body", "personality", "profession", "health", "hobby", "fear", "equipment", "backpack", "fact"];
         self.player_table(ui, room, "player-matrix", &keys, self.layout.players_cell_size);
     }
@@ -853,19 +880,19 @@ impl BunkerApp {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 ui.add_space(offset);
                 egui::Grid::new(id).spacing([0.0, 0.0]).show(ui, |ui| {
-                    ui.add_sized([player_width, 36.0], egui::Label::new("Игрок"));
+                    ui.add_sized([player_width, 36.0], egui::Label::new(FontWeight::SemiBold.text(self.theme.fonts.table_heading, "Игрок")));
                     for &kind in keys {
                         let name = room.category_labels.get(kind).map(String::as_str).unwrap_or_else(|| category_name(kind));
-                        ui.add_sized([cell[0], 36.0], egui::Label::new(RichText::new(name).size(self.theme.fonts.small)).wrap());
+                        ui.add_sized([cell[0], 36.0], egui::Label::new(FontWeight::SemiBold.text(self.theme.fonts.table_heading, name)).wrap());
                     }
                     ui.end_row();
                     for player in &room.players {
                         table_cell(ui, [player_width, cell[1]], line, |ui| {
                             self.avatar_widget(ui, player.avatar, false, (cell[1] - 8.0).min(35.0));
                             ui.vertical(|ui| {
-                                ui.add(egui::Label::new(RichText::new(&player.name).size(self.theme.fonts.small).strong()).truncate());
+                                ui.add(egui::Label::new(FontWeight::Medium.text(self.theme.fonts.table_body, &player.name)).truncate());
                                 let color = if player.active { self.theme.palette.muted.color() } else { self.theme.palette.negative.color() };
-                                ui.label(RichText::new(if player.active { "Участник" } else { "Выбыл" }).color(color).size(self.theme.fonts.small));
+                                ui.label(FontWeight::Medium.text(self.theme.fonts.table_body, if player.active { "Участник" } else { "Выбыл" }).color(color));
                             });
                         });
                         for &kind in keys {
@@ -878,11 +905,11 @@ impl BunkerApp {
                                     }
                                 }
                                 if let Some(card) = card {
-                                    ui.add(egui::Label::new(RichText::new(card_text(&card.value)).size(self.theme.fonts.small)).wrap()).on_hover_text(&card.value);
+                                    ui.add(egui::Label::new(FontWeight::Medium.text(self.theme.fonts.table_body, card_text(&card.value))).wrap()).on_hover_text(&card.value);
                                 } else if let Some(icon) = self.artwork.icon(Icon::Locked, 12.0) {
                                     ui.add(icon).on_hover_text("Закрыто");
                                 } else {
-                                    ui.label(RichText::new("Закрыто").size(self.theme.fonts.small));
+                                    ui.label(FontWeight::Medium.text(self.theme.fonts.table_body, "Закрыто"));
                                 }
                             });
                         }
@@ -934,7 +961,7 @@ impl BunkerApp {
                 ui.label(format!("{}: {} голосов", result.name, result.votes));
             }
             ui.add_space(14.0);
-            ui.label(RichText::new("Журнал партии").size(18.0).strong());
+            ui.label(FontWeight::Bold.text(self.theme.fonts.button, "Журнал партии"));
             for event in room.log.iter().rev().take(8) {
                 ui.label(RichText::new(event).color(self.theme.palette.muted.color()));
             }
@@ -967,7 +994,7 @@ impl BunkerApp {
                     );
                     let grid_width = side * f32::from(columns) + gap * f32::from(columns - 1);
                     ui.set_width(grid_width);
-                    ui.vertical_centered(|ui| { ui.label("Выберите аватар:"); });
+                    ui.vertical_centered(|ui| { ui.label(FontWeight::Regular.text(self.theme.fonts.avatar_caption, "Выберите аватар:")); });
                     ui.add_space(8.0);
                     for row in (1u8..=12).collect::<Vec<_>>().chunks(usize::from(columns)) {
                         let width = side * row.len() as f32 + gap * (row.len() - 1) as f32;
@@ -993,7 +1020,7 @@ impl BunkerApp {
                     let row_width = side + field + ui.spacing().item_spacing.x;
                     ui.set_width(row_width);
                     centered_row(ui, row_width, side, |ui| {
-                        let field = input_row(ui, &mut self.join_code, "Введите код игры", field, side, self.theme.palette.input.color());
+                        let field = input_row(ui, &mut self.join_code, "Введите код игры", field, side, self.theme.palette.input.color(), FontWeight::SemiBold.font(self.theme.fonts.input));
                         let button = self.artwork.button(Icon::Join, "→", self.theme.fonts.icon);
                         let submit = flat_button(ui, [side; 2], button, self.theme.accent_gradient(), self.theme.buttons.radius)
                             .on_hover_text("Присоединиться");
@@ -1015,12 +1042,12 @@ impl BunkerApp {
             egui::Window::new("Создать игру").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open)
                 .min_width(self.layout.dialog_width).default_width(self.layout.dialog_width).show(ctx, |ui| {
                 ui.vertical_centered(|ui| {
-                    ui.label(RichText::new("Набор карт").strong().size(self.theme.fonts.body));
+                    ui.label(FontWeight::Bold.text(self.theme.fonts.body, "Набор карт"));
                     ui.label(if self.pack_file.is_empty() { "Murr: стартовый набор" } else { &self.pack_file });
                     if ui.button("Выбрать JSON / ZIP-пак…").clicked() { self.pick_pack(); }
                     ui.label(RichText::new("ZIP: pack.json и изображения в assets/. Раздаётся остальным автоматически.").color(self.theme.palette.muted.color()).size(self.theme.fonts.small));
                     ui.separator();
-                    ui.label(RichText::new("События").strong().size(self.theme.fonts.body));
+                    ui.label(FontWeight::Bold.text(self.theme.fonts.body, "События"));
                     ui.add(egui::Slider::new(&mut self.event_chance, 0..=100).text("Шанс появления, %"));
                     ui.label(RichText::new("WIP: параметр сохраняется в комнате, сами события пока не запускаются.").color(self.theme.palette.muted.color()));
                     ui.add_space(12.0);

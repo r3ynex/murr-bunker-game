@@ -245,11 +245,14 @@ pub fn input_row(
     width: f32,
     height: f32,
     fill: Color32,
+    font: egui::FontId,
 ) -> Response {
     ui.add_sized(
         [width, height],
         egui::TextEdit::singleline(value)
             .hint_text(hint)
+            .hint_text_font(font.clone())
+            .font(font)
             .margin(egui::Margin::symmetric(18, 0))
             .min_size(Vec2::new(width, height))
             .background_color(fill)

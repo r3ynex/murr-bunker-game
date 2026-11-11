@@ -25,6 +25,56 @@ pub enum FontFamily {
     Builtin,
 }
 
+#[derive(Clone, Copy)]
+pub enum FontWeight {
+    Regular,
+    Medium,
+    SemiBold,
+    Bold,
+}
+
+impl FontWeight {
+    const ALTERNATES: [Self; 3] = [Self::Medium, Self::SemiBold, Self::Bold];
+
+    fn family(self) -> egui::FontFamily {
+        match self {
+            Self::Regular => egui::FontFamily::Proportional,
+            Self::Medium => egui::FontFamily::Name("Murr Medium".into()),
+            Self::SemiBold => egui::FontFamily::Name("Murr SemiBold".into()),
+            Self::Bold => egui::FontFamily::Name("Murr Bold".into()),
+        }
+    }
+
+    pub fn font(self, size: f32) -> egui::FontId {
+        egui::FontId::new(size, self.family())
+    }
+
+    pub fn text(self, size: f32, text: impl Into<String>) -> egui::RichText {
+        egui::RichText::new(text).font(self.font(size))
+    }
+
+    fn bundled_face(self) -> (&'static str, &'static [u8]) {
+        match self {
+            Self::Regular => (
+                "Manrope Regular",
+                include_bytes!("../assets/fonts/Manrope-Regular.ttf"),
+            ),
+            Self::Medium => (
+                "Manrope Medium",
+                include_bytes!("../assets/fonts/Manrope-Medium.ttf"),
+            ),
+            Self::SemiBold => (
+                "Manrope SemiBold",
+                include_bytes!("../assets/fonts/Manrope-SemiBold.ttf"),
+            ),
+            Self::Bold => (
+                "Manrope Bold",
+                include_bytes!("../assets/fonts/Manrope-Bold.ttf"),
+            ),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Theme {
@@ -72,6 +122,20 @@ pub struct Fonts {
     pub heading: f32,
     pub title: f32,
     pub icon: f32,
+    pub welcome_caption: f32,
+    pub input: f32,
+    pub profile_name: f32,
+    pub lobby_heading: f32,
+    pub lobby_count: f32,
+    pub lobby_name: f32,
+    pub lobby_side_button: f32,
+    pub avatar_caption: f32,
+    pub hero_body: f32,
+    pub bunker_body: f32,
+    pub bunker_seats: f32,
+    pub dossier: f32,
+    pub table_heading: f32,
+    pub table_body: f32,
 }
 
 #[derive(Deserialize)]
@@ -189,7 +253,28 @@ impl Theme {
 
     fn validate(&self) -> Result<(), String> {
         let f = &self.fonts;
-        for size in [f.body, f.button, f.small, f.heading, f.title, f.icon] {
+        for size in [
+            f.body,
+            f.button,
+            f.small,
+            f.heading,
+            f.title,
+            f.icon,
+            f.welcome_caption,
+            f.input,
+            f.profile_name,
+            f.lobby_heading,
+            f.lobby_count,
+            f.lobby_name,
+            f.lobby_side_button,
+            f.avatar_caption,
+            f.hero_body,
+            f.bunker_body,
+            f.bunker_seats,
+            f.dossier,
+            f.table_heading,
+            f.table_body,
+        ] {
             range(size, 8.0, 48.0)?;
         }
         for size in [
@@ -241,7 +326,7 @@ impl Theme {
     }
 
     pub fn apply(&self, ctx: &egui::Context) -> Option<String> {
-        let (font, warning) = self.fonts.load_font();
+        let (font, manrope, warning) = self.fonts.load_font();
         let mut fonts = egui::FontDefinitions::default();
         if let Some(data) = font {
             let name = "Murr custom font".to_owned();
@@ -253,6 +338,18 @@ impl Theme {
                 .entry(egui::FontFamily::Proportional)
                 .or_default()
                 .insert(0, name);
+        }
+        let proportional = fonts.families[&egui::FontFamily::Proportional].clone();
+        for weight in FontWeight::ALTERNATES {
+            let mut family = proportional.clone();
+            if manrope {
+                let (name, bytes) = weight.bundled_face();
+                fonts
+                    .font_data
+                    .insert(name.into(), egui::FontData::from_static(bytes).into());
+                family.insert(0, name.into());
+            }
+            fonts.families.insert(weight.family(), family);
         }
         ctx.set_fonts(fonts);
 
@@ -278,10 +375,22 @@ impl Theme {
         style.spacing.item_spacing = self.spacing.items.into();
         style.spacing.button_padding = self.buttons.padding.into();
         for (kind, size) in [
-            (egui::TextStyle::Body, self.fonts.body),
-            (egui::TextStyle::Button, self.fonts.button),
-            (egui::TextStyle::Small, self.fonts.small),
-            (egui::TextStyle::Heading, self.fonts.heading),
+            (
+                egui::TextStyle::Body,
+                FontWeight::Regular.font(self.fonts.body),
+            ),
+            (
+                egui::TextStyle::Button,
+                FontWeight::SemiBold.font(self.fonts.button),
+            ),
+            (
+                egui::TextStyle::Small,
+                FontWeight::Regular.font(self.fonts.small),
+            ),
+            (
+                egui::TextStyle::Heading,
+                FontWeight::Bold.font(self.fonts.heading),
+            ),
         ] {
             style
                 .text_styles
@@ -293,8 +402,8 @@ impl Theme {
 
     pub fn accent_button(&self, label: impl Into<String>) -> egui::Button<'static> {
         egui::Button::new(
-            egui::RichText::new(label)
-                .strong()
+            FontWeight::SemiBold
+                .text(self.fonts.button, label)
                 .color(self.palette.accent_text.color()),
         )
         .fill(self.palette.accent.color())
@@ -305,13 +414,13 @@ impl Theme {
 }
 
 impl Fonts {
-    fn load_font(&self) -> (Option<Vec<u8>>, Option<String>) {
+    fn load_font(&self) -> (Option<Vec<u8>>, bool, Option<String>) {
         let warning = if let Some(filename) = &self.file {
             let data = read_bounded(&portable_path("fonts").join(filename), 8_000_000)
                 .ok()
                 .and_then(valid_font);
             if data.is_some() {
-                return (data, None);
+                return (data, false, None);
             }
             Some(format!("Шрифт {filename} недоступен или повреждён"))
         } else {
@@ -319,7 +428,7 @@ impl Fonts {
         };
 
         if matches!(self.family, FontFamily::Builtin) {
-            return (None, warning);
+            return (None, false, warning);
         }
 
         let from_zip = || {
@@ -346,8 +455,8 @@ impl Fonts {
                     })
             })
         });
-        let data = data.unwrap_or_else(|| include_bytes!("../assets/fonts/Manrope.ttf").to_vec());
-        (Some(data), warning)
+        let data = data.unwrap_or_else(|| FontWeight::Regular.bundled_face().1.to_vec());
+        (Some(data), true, warning)
     }
 }
 
