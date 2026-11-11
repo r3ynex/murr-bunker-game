@@ -471,9 +471,12 @@ impl BunkerApp {
                     Self::avatar_widget(ui, player.avatar, false, 47.0);
                     ui.vertical(|ui| {
                         ui.label(RichText::new(&player.name).size(19.0).strong());
-                        ui.label(RichText::new(if player.id == room.host_id { "♛ Ведущий" }
-                            else if player.ready { "Готов" } else { "Не готов" })
-                            .color(if player.ready { GREEN } else { MUTED }).size(13.0));
+                        if player.id == room.host_id {
+                            ui.label(RichText::new("♛ Ведущий").color(GOLD).size(13.0));
+                        } else {
+                            ui.label(RichText::new(if player.ready { "Готов" } else { "Не готов" })
+                                .color(if player.ready { GREEN } else { RED }).size(13.0));
+                        }
                     });
                 });
                 if i % 3 == 2 { cols[0].add_space(9.0); }
@@ -597,7 +600,8 @@ impl BunkerApp {
                             ).color(MUTED));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 let marker = if card.revealed { "🔓" } else { "🔒" };
-                                if ui.add(egui::Button::new(marker).frame(false))
+                                let color = if card.revealed { GREEN } else { RED };
+                                if ui.add(egui::Button::new(RichText::new(marker).color(color)).frame(false))
                                     .on_hover_text(if card.revealed { "Уже открыто" } else { "Открыть карту всем игрокам" }).clicked()
                                     && !card.revealed && me.active {
                                     self.send(json!({"type":"reveal","kind":card.kind}));
