@@ -3,13 +3,13 @@ use crate::appearance::{portable_path, with_icon, Layout, Theme};
 use crate::artwork::{centered_row, flat_button, input_row, paint_cover, paint_gradient, table_cell, Artwork, Icon};
 use crate::network;
 use eframe::egui::{self, Color32, RichText, Stroke};
-use ewebsock::{WsEvent, WsMessage, WsReceiver, WsSender};
+use ewebsock::{WsEvent, WsMessage, WsSender};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_PACK_BYTES: usize = 2_000_000;
 
@@ -90,23 +90,27 @@ fn appearance_warnings(warnings: [Option<String>; 3]) -> String {
     warnings.into_iter().flatten().collect::<Vec<_>>().join("\n")
 }
 
+struct Toast {
+    text: String,
+    started: Instant,
+}
+
 pub struct BunkerApp {
     theme: Theme,
     artwork: Artwork,
     layout: Layout,
-    appearance_message: String,
+    toast: Option<Toast>,
     server_url: String,
     nickname: String,
     avatar: Option<u8>,
     avatar_images: Vec<Option<egui::TextureHandle>>,
     profile_ready: bool,
     join_code: String,
-    status: String,
     session: Option<Session>,
     room: Option<Room>,
     pending: Option<Receiver<Result<Session, String>>>,
     sender: Option<WsSender>,
-    receiver: Option<WsReceiver>,
+    receiver: Option<Receiver<WsEvent>>,
     online: bool,
     create_on_connect: bool,
     show_avatar_picker: bool,
@@ -150,13 +154,15 @@ impl BunkerApp {
             theme,
             artwork: Artwork::load(&cc.egui_ctx),
             layout,
-            appearance_message,
+            toast: (!appearance_message.is_empty()).then(|| Toast {
+                text: appearance_message,
+                started: Instant::now(),
+            }),
             server_url: config.server_url,
             nickname: config.nickname,
             avatar: if profile_ready { Some(config.avatar) } else { None },
             avatar_images,
             profile_ready, join_code: String::new(),
-            status: "Готово к подключению".into(),
             session: None, room: None, pending: None, sender: None, receiver: None, online: false,
             create_on_connect: false,
             show_avatar_picker: false, show_join: false, show_create: false,
@@ -180,11 +186,54 @@ impl BunkerApp {
         self.avatar_images = load_avatar_images(ctx);
         self.theme = theme;
         self.layout = layout;
-        self.appearance_message = appearance_warnings([theme_warning, layout_warning, font_warning]);
-        if self.appearance_message.is_empty() {
-            self.appearance_message = "Оформление обновлено".into();
+        let warnings = appearance_warnings([theme_warning, layout_warning, font_warning]);
+        if warnings.is_empty() {
+            self.notify("Оформление обновлено");
+        } else {
+            self.notify(warnings);
         }
         ctx.request_repaint();
+    }
+
+    fn notify(&mut self, text: impl Into<String>) {
+        self.toast = Some(Toast { text: text.into(), started: Instant::now() });
+    }
+
+    fn show_toast(&mut self, ctx: &egui::Context) {
+        const FADE_IN: f32 = 0.22;
+        const HOLD_UNTIL: f32 = 3.5;
+        const FADE_OUT: f32 = 0.40;
+
+        let Some(toast) = &self.toast else { return; };
+        let elapsed = toast.started.elapsed().as_secs_f32();
+        let end = HOLD_UNTIL + FADE_OUT;
+        if elapsed >= end {
+            self.toast = None;
+            return;
+        }
+
+        let progress = (elapsed / FADE_IN).min((end - elapsed) / FADE_OUT).clamp(0.0, 1.0);
+        let opacity = progress * progress * (3.0 - 2.0 * progress);
+        let bottom = f32::from(self.layout.status_margin) + 8.0;
+        egui::Area::new(egui::Id::new("status-toast"))
+            .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(16.0, -bottom + 6.0 * (1.0 - opacity)))
+            .order(egui::Order::Tooltip)
+            .interactable(false)
+            .show(ctx, |ui| {
+                ui.multiply_opacity(opacity);
+                egui::Frame::new().fill(self.theme.palette.status.color())
+                    .corner_radius(5u8).inner_margin(egui::Margin::symmetric(10, 6))
+                    .show(ui, |ui| {
+                        ui.set_max_width(420.0);
+                        ui.add(egui::Label::new(RichText::new(&toast.text)
+                            .color(self.theme.palette.text.color()).size(self.theme.fonts.small)).wrap());
+                    });
+            });
+        if elapsed < FADE_IN || elapsed >= HOLD_UNTIL {
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(Duration::from_secs_f32(HOLD_UNTIL - elapsed));
+        }
     }
 
     fn save_config(&mut self) {
@@ -196,8 +245,8 @@ impl BunkerApp {
         match serde_json::to_string_pretty(&config)
             .map_err(|e| e.to_string())
             .and_then(|text| fs::write(portable_path("murr-config.json"), text).map_err(|e| e.to_string())) {
-            Ok(_) => self.status = "Настройки сохранены".into(),
-            Err(e) => self.status = format!("Не удалось сохранить: {e}"),
+            Ok(_) => self.notify("Настройки сохранены"),
+            Err(e) => self.notify(format!("Не удалось сохранить: {e}")),
         }
     }
     fn complete_profile(&mut self) {
@@ -205,7 +254,7 @@ impl BunkerApp {
             self.nickname = format!("Выживший #{}", random_int(100, 9999));
         }
         if self.nickname.trim().chars().count() > 24 || self.nickname.trim().chars().count() < 2 {
-            self.status = "Ник должен содержать от 2 до 24 символов".into();
+            self.notify("Ник должен содержать от 2 до 24 символов");
             return;
         }
         if self.avatar.is_none() { self.avatar = Some(random_int(1, 12) as u8); }
@@ -223,27 +272,28 @@ impl BunkerApp {
         self.downloading_sha = None;
         self.hero_texture = None;
         self.create_on_connect = join.is_none();
-        self.status = "Подключаемся к комнате…".into();
+        self.notify("Подключаемся к комнате…");
         self.pending = Some(network::request_room(
             self.server_url.clone(), self.nickname.trim().to_owned(),
             self.avatar.unwrap_or(1), join
         ));
     }
-    fn connect_session(&mut self, session: Session) {
-        match network::connect(&self.server_url, &session) {
+    fn connect_session(&mut self, ctx: &egui::Context, session: Session) {
+        let ctx = ctx.clone();
+        match network::connect(&self.server_url, &session, move || ctx.request_repaint()) {
             Ok((sender, receiver)) => {
-                self.status = format!("Подключаемся к комнате {}…", session.code);
+                self.notify(format!("Подключаемся к комнате {}…", session.code));
                 self.session = Some(session);
                 self.sender = Some(sender);
                 self.receiver = Some(receiver);
                 self.online = false;
             }
-            Err(e) => self.status = e,
+            Err(e) => self.notify(e),
         }
     }
     fn send(&mut self, command: Value) {
         if !self.online {
-            self.status = "Нет соединения — переподключись".into();
+            self.notify("Нет соединения — переподключись");
         } else if let Some(sender) = &mut self.sender {
             sender.send(WsMessage::Text(command.to_string().into()));
         }
@@ -254,12 +304,12 @@ impl BunkerApp {
                 self.upload_pending = Some(network::upload_bundle(
                     self.server_url.clone(), session, bytes.clone()
                 ));
-                self.status = "Передаём ZIP-пак комнате…".into();
+                self.notify("Передаём ZIP-пак комнате…");
             }
         } else {
             match serde_json::from_str::<Value>(&self.pack_json) {
                 Ok(pack) => self.send(json!({"type":"set_pack", "pack":pack})),
-                Err(e) => self.status = format!("Ошибка пака: {e}"),
+                Err(e) => self.notify(format!("Ошибка пака: {e}")),
             }
         }
     }
@@ -289,9 +339,9 @@ impl BunkerApp {
                 self.pack_json = json;
                 self.pack_zip = zip;
                 self.pack_file = path.display().to_string();
-                self.status = format!("Выбран пак: {}", path.display());
+                self.notify(format!("Выбран пак: {}", path.display()));
             }
-            Err(e) => self.status = format!("Ошибка загрузки пака: {e}"),
+            Err(e) => self.notify(format!("Ошибка загрузки пака: {e}")),
         }
     }
     fn pick_pack(&mut self) {
@@ -321,15 +371,15 @@ impl BunkerApp {
         if let Some(reply) = self.pending.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.pending = None;
             match reply {
-                Ok(session) => self.connect_session(session),
-                Err(e) => self.status = e,
+                Ok(session) => self.connect_session(ctx, session),
+                Err(e) => self.notify(e),
             }
         }
         if let Some(reply) = self.upload_pending.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.upload_pending = None;
             match reply {
-                Ok(name) => self.status = format!("ZIP-пак «{name}» передан всем участникам"),
-                Err(e) => self.status = format!("Ошибка ZIP-пака: {e}"),
+                Ok(name) => self.notify(format!("ZIP-пак «{name}» передан всем участникам")),
+                Err(e) => self.notify(format!("Ошибка ZIP-пака: {e}")),
             }
         }
         if let Some(reply) = self.download_pending.as_ref().and_then(|rx| rx.try_recv().ok()) {
@@ -342,42 +392,46 @@ impl BunkerApp {
                         .and_then(|b| b.background.clone());
                     if let Some(name) = background {
                         if let Err(e) = self.load_texture_from_zip(ctx, &bytes, &name) {
-                            self.status = format!("Фон пака не загрузился: {e}");
+                            self.notify(format!("Фон пака не загрузился: {e}"));
                         }
                     }
                 }
-                Err(e) => self.status = format!("Не удалось получить медиа пака: {e}"),
+                Err(e) => self.notify(format!("Не удалось получить медиа пака: {e}")),
             }
         }
         let events: Vec<WsEvent> = self.receiver.as_ref()
-            .map(|rx| std::iter::from_fn(|| rx.try_recv()).take(100).collect())
+            .map(|rx| std::iter::from_fn(|| rx.try_recv().ok()).take(100).collect())
             .unwrap_or_default();
+        if events.len() == 100 { ctx.request_repaint(); }
         for event in events {
             match event {
                 WsEvent::Opened => {
                     self.online = true;
-                    self.status = "Соединение установлено".into();
+                    self.notify("Соединение установлено");
                     if self.create_on_connect {
                         self.create_on_connect = false;
                         self.apply_pack();
                         self.send(json!({"type":"set_event_chance","chance":self.event_chance}));
                     }
                 }
-                WsEvent::Closed => { self.online = false; self.status = "Соединение закрыто".into(); }
-                WsEvent::Error(e) => { self.online = false; self.status = format!("Связь: {e}"); }
+                WsEvent::Closed => {
+                    if self.online { self.notify("Соединение закрыто"); }
+                    self.online = false;
+                }
+                WsEvent::Error(e) => { self.online = false; self.notify(format!("Связь: {e}")); }
                 WsEvent::Message(WsMessage::Text(text)) => {
                     if let Ok(message) = serde_json::from_str::<Value>(&text) {
                         match message.get("type").and_then(Value::as_str) {
                             Some("state") => {
                                 if let Some(data) = message.get("data") {
                                     match serde_json::from_value::<Room>(data.clone()) {
-                                        Ok(room) => self.room = Some(room),
-                                        Err(e) => self.status = format!("Данные комнаты: {e}"),
+                                        Ok(room) => self.update_room(room),
+                                        Err(e) => self.notify(format!("Данные комнаты: {e}")),
                                     }
                                 }
                             }
-                            Some("error") => self.status = message["message"]
-                                .as_str().unwrap_or("Ошибка сервера").to_owned(),
+                            Some("error") => self.notify(message["message"]
+                                .as_str().unwrap_or("Ошибка сервера")),
                             _ => {}
                         }
                     }
@@ -401,6 +455,19 @@ impl BunkerApp {
             }
         }
     }
+    fn update_room(&mut self, room: Room) {
+        let joined = self.room.as_ref()
+            .filter(|previous| previous.code == room.code && room.stage == "lobby")
+            .and_then(|previous| room.players.iter().find(|player| {
+                !previous.players.iter().any(|known| known.id == player.id)
+            }))
+            .map(|player| format!("Новый участник: {}", player.name));
+        self.room = Some(room);
+        if let Some(message) = joined {
+            self.notify(message);
+        }
+    }
+
     fn leave_room(&mut self) {
         if self.online { self.send(json!({"type":"leave"})); }
         self.sender = None;
@@ -408,7 +475,7 @@ impl BunkerApp {
         self.room = None;
         self.session = None;
         self.online = false;
-        self.status = "Вы вышли в главное меню".into();
+        self.notify("Вы вышли в главное меню");
     }
     fn avatar_widget(&self, ui: &mut egui::Ui, avatar: u8, selected: bool, size: f32) -> egui::Response {
         let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
@@ -936,7 +1003,7 @@ impl BunkerApp {
                                 self.start_request(Some(code));
                                 self.show_join = false;
                             } else {
-                                self.status = "Нужен восьмисимвольный код".into();
+                                self.notify("Нужен восьмисимвольный код");
                             }
                         }
                     });
@@ -1070,23 +1137,6 @@ impl eframe::App for BunkerApp {
             self.reload_appearance(ctx);
         }
         self.poll_network(ctx);
-        ctx.request_repaint_after(Duration::from_millis(80));
-        egui::TopBottomPanel::bottom("murr-status")
-            .frame(egui::Frame::new().fill(self.theme.palette.status.color()).inner_margin(self.layout.status_margin))
-            .show(ctx, |ui| {
-                if !self.appearance_message.is_empty() {
-                    ui.label(RichText::new(&self.appearance_message).color(self.theme.palette.accent.color()).size(self.theme.fonts.small));
-                }
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&self.status).color(self.theme.palette.muted.color()).size(self.theme.fonts.small));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some(room) = self.room.as_ref().map(|r| (r.code.clone(), r.round)) {
-                            if ui.small_button("В меню").clicked() { self.leave_room(); }
-                            ui.label(RichText::new(format!("{} · Раунд {}", room.0, room.1)).color(self.theme.palette.muted.color()));
-                        }
-                    });
-                });
-            });
         egui::CentralPanel::default().frame(egui::Frame::new().fill(self.theme.palette.background.color()).inner_margin(self.layout.content_margin))
             .show(ctx, |ui| {
                 let room = self.room.clone();
@@ -1096,6 +1146,11 @@ impl eframe::App for BunkerApp {
                         "playing" => {
                             self.ui_game(ui, &room);
                             self.game_navigation(ctx);
+                            egui::Area::new(egui::Id::new("leave-game"))
+                                .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
+                                .movable(false).show(ctx, |ui| {
+                                    if ui.button("В меню").clicked() { self.leave_room(); }
+                                });
                         },
                         _ => self.ui_finished(ui, &room)
                     }
@@ -1106,5 +1161,9 @@ impl eframe::App for BunkerApp {
                 }
             });
         self.ui_overlays(ctx);
+        self.show_toast(ctx);
+        if self.pending.is_some() || self.upload_pending.is_some() || self.download_pending.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(80));
+        }
     }
 }
