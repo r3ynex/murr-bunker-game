@@ -245,6 +245,9 @@ export class Room extends DurableObject {
         state.round = 1;
         const scenario = drawScenario(state.pack);
         state.catastrophe = scenario.catastrophe;
+        if (state.bundle && scenario.background !== undefined) {
+          state.bundle.background = scenario.background;
+        }
         state.bunker = scenario.bunker;
         state.players.forEach(p => {
           p.active = true;

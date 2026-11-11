@@ -299,6 +299,7 @@ fn original_cards(section: &Value) -> Value {
                 "height1",
                 "height2",
                 "timer",
+                "image",
             ];
             Value::Object(
                 fields
@@ -333,13 +334,67 @@ pub fn selected_payload(entries: &[Entry]) -> Result<(String, Option<Vec<u8>>), 
     }
 }
 
+fn append_catastrophes(
+    target: &mut Vec<Value>,
+    source: &Value,
+    paths: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let legacy = paths
+        .iter()
+        .find(|(path, _)| {
+            path.rsplit_once('.')
+                .is_some_and(|(stem, _)| stem == "assets/catastrophe")
+        })
+        .map(|(_, name)| name);
+    let mut rewritten = Vec::new();
+    for card in source.as_array().ok_or("Ожидается список катаклизмов")? {
+        let mut card = match card {
+            Value::String(title) => json!({"title": title}),
+            Value::Object(_) => card.clone(),
+            _ => return Err("Некорректная запись катаклизма".into()),
+        };
+        let explicit = card
+            .as_object_mut()
+            .expect("catastrophe object")
+            .remove("image");
+        let image = match explicit {
+            None | Some(Value::Null) => legacy,
+            Some(Value::String(path)) if path.trim().is_empty() => legacy,
+            Some(Value::String(path)) => {
+                let path = path.trim().to_ascii_lowercase();
+                let path = if path.starts_with("assets/") {
+                    path
+                } else {
+                    format!("assets/{path}")
+                };
+                paths.get(&path)
+            }
+            _ => return Err("Поле image должно содержать имя изображения".into()),
+        };
+        if let Some(image) = image {
+            card["image"] = json!(image);
+        }
+        rewritten.push(card);
+    }
+    append(target, &json!(rewritten), 200)
+}
+
 fn merge(packs: &[&Pack]) -> Result<Pack, String> {
     let mut categories = Map::new();
     let mut catastrophes = Vec::new();
     let mut bunker = Map::new();
     let mut assets = BTreeMap::new();
-    let mut has_background = false;
-    for pack in packs {
+    for (index, pack) in packs.iter().enumerate() {
+        let mut paths = BTreeMap::new();
+        for (name, data) in &pack.assets {
+            let normalized = name.to_ascii_lowercase();
+            let relative = normalized
+                .strip_prefix("assets/")
+                .expect("validated asset path");
+            let namespaced = format!("assets/pack-{}/{relative}", index + 1);
+            paths.insert(normalized, namespaced.clone());
+            assets.entry(namespaced).or_insert_with(|| data.clone());
+        }
         let root = &pack.json;
         let mut original_world = Map::new();
         let original_catastrophes;
@@ -382,7 +437,7 @@ fn merge(packs: &[&Pack]) -> Result<Pack, String> {
                 }
             }
             original_catastrophes = original_cards(&root["catastrophe"]);
-            append(&mut catastrophes, &original_catastrophes, 200)?;
+            append_catastrophes(&mut catastrophes, &original_catastrophes, &paths)?;
         } else {
             if root
                 .get("formatVersion")
@@ -402,7 +457,7 @@ fn merge(packs: &[&Pack]) -> Result<Pack, String> {
                 }
             }
             if let Some(section) = world.get("catastrophes") {
-                append(&mut catastrophes, section, 200)?;
+                append_catastrophes(&mut catastrophes, section, &paths)?;
             }
             if let Some(sections) = world.get("bunker") {
                 original_world.extend(
@@ -418,17 +473,6 @@ fn merge(packs: &[&Pack]) -> Result<Pack, String> {
         for (kind, entries) in original_world {
             let section = bunker.entry(kind).or_insert_with(|| json!([]));
             append(section.as_array_mut().expect("bunker list"), &entries, 200)?;
-        }
-        for (name, data) in &pack.assets {
-            let normalized = name.to_ascii_lowercase();
-            let background = normalized
-                .rsplit_once('.')
-                .is_some_and(|(stem, _)| stem == "assets/catastrophe");
-            if background && has_background {
-                continue;
-            }
-            has_background |= background;
-            assets.entry(normalized).or_insert_with(|| data.clone());
         }
     }
     if categories.len() > 36 {
@@ -452,12 +496,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn combines_base_and_imported_cards_and_keeps_first_background() {
+    fn combines_cards_and_keeps_each_catastrophe_image_with_its_pack() {
         let mut base = Entry::read(None).unwrap();
         base.assets.insert("assets/catastrophe.png".into(), vec![1]);
         let extra = Pack {
-            json: json!({"spec":{"data":[{"title":"Test ability"}]},"profession":{"data":[{"title":"Test profession","stage":"Expert"}]}}),
-            assets: BTreeMap::from([("assets/catastrophe.jpg".into(), vec![2])]),
+            json: json!({"spec":{"data":[{"title":"Test ability"}]},"profession":{"data":[{"title":"Test profession","stage":"Expert"}]},"catastrophe":{"data":[{"title":"Test scenario","image":"storm.jpg"},{"title":"No image","image":"absent.png"}]}}),
+            assets: BTreeMap::from([("assets/storm.jpg".into(), vec![2])]),
         };
         let merged = merge(&[&base, &extra]).unwrap();
         let cards = merged.json["categories"]["profession"]["cards"]
@@ -467,8 +511,13 @@ mod tests {
             .iter()
             .any(|card| card["title"] == "Test profession" && card["stage"] == "Expert"));
         assert!(cards.iter().any(|card| card["title"] == "Купец"));
-        assert_eq!(merged.assets.len(), 1);
-        assert_eq!(merged.assets["assets/catastrophe.png"], [1]);
+        assert_eq!(merged.assets.len(), 2);
+        assert_eq!(merged.assets["assets/pack-1/catastrophe.png"], [1]);
+        assert_eq!(merged.assets["assets/pack-2/storm.jpg"], [2]);
+        let scenarios = merged.json["catastrophes"].as_array().unwrap();
+        assert_eq!(scenarios[0]["image"], "assets/pack-1/catastrophe.png");
+        assert_eq!(scenarios[1]["image"], "assets/pack-2/storm.jpg");
+        assert!(scenarios[2].get("image").is_none());
         let (_, zip) = merged.payload().unwrap();
         assert!(zip.is_some());
     }

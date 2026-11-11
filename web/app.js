@@ -317,16 +317,24 @@ function render() {
 let loadedBackground = "";
 let currentBackgroundUrl = null;
 async function updateBackground(state) {
-  const sha = state.bundle?.sha256;
-  if (!sha || loadedBackground === sha || !session) return;
-  loadedBackground = sha;
+  const bundle = state.bundle;
+  const key = bundle?.background ? JSON.stringify([state.code, bundle.sha256, bundle.background]) : "";
+  if (loadedBackground === key || !session) return;
+  loadedBackground = key;
+  if (currentBackgroundUrl) {
+    URL.revokeObjectURL(currentBackgroundUrl);
+    currentBackgroundUrl = null;
+    document.documentElement.style.removeProperty('--room-background');
+  }
+  if (!key) return;
   try {
     const response = await fetch(getBase() + '/api/rooms/' + state.code + '/background', {
       headers: { authorization: 'Bearer ' + session.token }
     });
     if (!response.ok) return;
-    if (currentBackgroundUrl) URL.revokeObjectURL(currentBackgroundUrl);
-    currentBackgroundUrl = URL.createObjectURL(await response.blob());
+    const blob = await response.blob();
+    if (loadedBackground !== key) return;
+    currentBackgroundUrl = URL.createObjectURL(blob);
     document.documentElement.style.setProperty('--room-background', 'url("' + currentBackgroundUrl + '")');
   } catch {
     // A missing optional background should not prevent the game from working.

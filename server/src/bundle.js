@@ -87,6 +87,11 @@ export function readBundle(input) {
     }
   }
   const background = images.find(x => /^assets\/catastrophe\.(png|jpe?g|webp)$/i.test(x)) || null;
+  for (const catastrophe of pack.catastrophes) {
+    catastrophe.image = catastrophe.image
+      ? images.find(name => name.toLowerCase() === catastrophe.image.toLowerCase()) ?? null
+      : background;
+  }
   return { pack, background, images };
 }
 export async function sha256Hex(bytes) {

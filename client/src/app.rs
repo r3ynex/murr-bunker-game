@@ -187,7 +187,7 @@ pub struct BunkerApp {
     upload_pending: Option<Receiver<Result<String, String>>>,
     pack_upload_failed: bool,
     download_pending: Option<Receiver<Result<Vec<u8>, String>>>,
-    background_sha: Option<String>,
+    background_key: Option<String>,
     hero_texture: Option<egui::TextureHandle>,
 }
 
@@ -227,7 +227,7 @@ impl BunkerApp {
             dice_sides: 6, event_chance: 0,
             pack_json: crate::packs::BASE.to_owned(),
             room_packs: crate::packs::library(), pack_zip: None,
-            upload_pending: None, pack_upload_failed: false, download_pending: None, background_sha: None,
+            upload_pending: None, pack_upload_failed: false, download_pending: None, background_key: None,
             hero_texture: None,
         }
     }
@@ -385,7 +385,7 @@ impl BunkerApp {
     }
 
     fn clear_background(&mut self) {
-        self.background_sha = None;
+        self.background_key = None;
         self.download_pending = None;
         self.hero_texture = None;
     }
@@ -400,8 +400,9 @@ impl BunkerApp {
             self.clear_background();
             return;
         };
-        if self.background_sha.as_deref() != Some(&bundle.sha256) {
-            self.background_sha = Some(bundle.sha256.clone());
+        let key = format!("{}:{}", bundle.sha256, bundle.background.as_deref().unwrap_or_default());
+        if self.background_key.as_deref() != Some(&key) {
+            self.background_key = Some(key);
             self.hero_texture = None;
             self.download_pending = Some(network::download_background(
                 self.server_url.clone(), session.clone(),

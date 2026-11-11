@@ -148,7 +148,7 @@ function slimOriginal(entry) {
   if (typeof entry === "string") return entry;
   if (!record(entry)) throw Error("Некорректная запись экспорта");
   const result = { title: entry.title };
-  for (const key of ["description", "stage", "age1", "age2", "height1", "height2", "timer"]) {
+  for (const key of ["description", "stage", "age1", "age2", "height1", "height2", "timer", "image"]) {
     if (entry[key] !== undefined && entry[key] !== null) result[key] = entry[key];
   }
   if (entry.id !== undefined) result.id = String(entry.id);
@@ -253,7 +253,18 @@ export function normalizePack(source) {
   if (!v2) for (const key of Object.keys(inputCategories)) {
     if (!CATEGORIES.includes(key)) throw Error("Неизвестная категория: " + key);
   }
-  const catastrophes = cleanEntries(input.catastrophes ?? DEFAULT_INPUT.catastrophes, "Катаклизмы", 200);
+  const rawCatastrophes = input.catastrophes ?? DEFAULT_INPUT.catastrophes;
+  const catastrophes = cleanEntries(rawCatastrophes, "Катаклизмы", 200);
+  for (let i = 0; i < catastrophes.length; i++) {
+    const image = field(rawCatastrophes[i]?.image, "изображение катаклизма", 240);
+    if (image) {
+      const asset = image.startsWith("assets/") ? image : "assets/" + image;
+      if (!/^assets\/[a-zA-Z0-9_./-]+\.(png|jpe?g|webp)$/i.test(asset) || asset.includes("..") || asset.includes("//")) {
+        throw Error("Изображение катаклизма должно быть PNG, JPG или WebP в assets/");
+      }
+      catastrophes[i].image = asset;
+    }
+  }
   let bunkerInput;
   if (v2 && input.bunker !== undefined) {
     if (!record(input.bunker)) throw Error("bunker должен быть объектом");
@@ -308,10 +319,11 @@ export function drawCard(pack, kind) {
     revealed: false, description: entry.description ?? "" };
 }
 export function drawScenario(pack) {
-  const catastrophe = formatted(pickEntry(pack.catastrophes));
+  const selected = pickEntry(pack.catastrophes);
+  const catastrophe = formatted(selected);
   const lines = [];
   for (const [key, label] of Object.entries(BUNKER_LABELS)) {
     if (pack.bunker[key]?.length) lines.push(label + ": " + formatted(pickEntry(pack.bunker[key])));
   }
-  return { catastrophe, bunker: lines.join("\n") };
+  return { catastrophe, bunker: lines.join("\n"), background: selected.image };
 }
