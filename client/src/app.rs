@@ -403,14 +403,11 @@ impl BunkerApp {
         self.online = false;
         self.status = "Вы вышли в главное меню".into();
     }
-    fn avatar_widget(
-        ui: &mut egui::Ui, avatar: u8, selected: bool, size: f32,
-        images: &[Option<egui::TextureHandle>],
-    ) -> egui::Response {
+    fn avatar_widget(&self, ui: &mut egui::Ui, avatar: u8, selected: bool, size: f32) -> egui::Response {
         let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 4.0, avatar_color(avatar).gamma_multiply(0.55));
-        if let Some(texture) = images.get(avatar.saturating_sub(1) as usize).and_then(Option::as_ref) {
+        if let Some(texture) = self.avatar_images.get(avatar.saturating_sub(1) as usize).and_then(Option::as_ref) {
             painter.image(
                 texture.id(), rect.shrink(2.0),
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
@@ -440,7 +437,7 @@ impl BunkerApp {
                 let row_width = 70.0 + self.layout.welcome_name_width
                     + self.theme.buttons.accent_size[0] + 2.0 * ui.spacing().item_spacing.x;
                 ui.add_space((ui.available_width() - row_width).max(0.0) * 0.5);
-                if Self::avatar_widget(ui, self.avatar.unwrap_or(1), self.avatar.is_some(), 70.0, &self.avatar_images).clicked() {
+                if self.avatar_widget(ui, self.avatar.unwrap_or(1), self.avatar.is_some(), 70.0).clicked() {
                     self.show_avatar_picker = true;
                 }
                 ui.add(egui::TextEdit::singleline(&mut self.nickname)
@@ -457,7 +454,7 @@ impl BunkerApp {
         ui.vertical_centered(|ui| {
             ui.horizontal(|ui| {
                 ui.add_space((ui.available_width() - 260.0).max(0.0) * 0.5);
-                Self::avatar_widget(ui, self.avatar.unwrap_or(1), true, 58.0, &self.avatar_images);
+                self.avatar_widget(ui, self.avatar.unwrap_or(1), true, 58.0);
                 ui.label(RichText::new(&self.nickname).size(self.theme.fonts.heading).strong());
             });
             ui.add_space(52.0);
@@ -492,7 +489,7 @@ impl BunkerApp {
             for (i, player) in room.players.iter().enumerate() {
                 cols[i % columns].horizontal(|ui| {
                     ui.label(RichText::new("▏").size(40.0).color(if player.ready || player.id == room.host_id { self.theme.palette.positive.color() } else { self.theme.palette.negative.color() }));
-                    Self::avatar_widget(ui, player.avatar, false, self.layout.lobby_avatar_size, &self.avatar_images);
+                    self.avatar_widget(ui, player.avatar, false, self.layout.lobby_avatar_size);
                     ui.vertical(|ui| {
                         ui.label(RichText::new(&player.name).size(self.theme.fonts.body).strong());
                         if player.id == room.host_id {
@@ -551,7 +548,7 @@ impl BunkerApp {
                 egui::pos2(0.0,0.0),egui::pos2(1.0,1.0)), Color32::from_white_alpha(185));
         }
         painter.rect_filled(rect, self.theme.buttons.radius, Color32::from_black_alpha(125));
-        painter.rect_stroke(rect, self.theme.buttons.radius, Stroke::new(1.0, self.theme.palette.outline.color()), egui::StrokeKind::Outside);
+        painter.rect_stroke(rect, self.theme.buttons.radius, Stroke::new(1.0_f32, self.theme.palette.outline.color()), egui::StrokeKind::Outside);
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink2(self.layout.hero_inset.into())), |ui| {
             ui.add_space(self.layout.hero_top_gap);
             ui.vertical_centered(|ui| {
@@ -663,7 +660,7 @@ impl BunkerApp {
                     ui.end_row();
                     for p in &room.players {
                         ui.horizontal(|ui| {
-                            Self::avatar_widget(ui, p.avatar, false, 30.0, &self.avatar_images);
+                            self.avatar_widget(ui, p.avatar, false, 30.0);
                             ui.vertical(|ui| {
                                 ui.label(RichText::new(&p.name).strong());
                                 ui.label(RichText::new(if p.active { "Участник" } else { "Выбыл" })
@@ -700,7 +697,7 @@ impl BunkerApp {
                     ui.add_sized([self.layout.abilities_cell_size[0], 35.0], egui::Label::new("Спец. возможность 2"));
                     ui.end_row();
                     for p in &room.players {
-                        ui.horizontal(|ui| { Self::avatar_widget(ui, p.avatar, false, 29.0, &self.avatar_images); ui.label(&p.name); });
+                        ui.horizontal(|ui| { self.avatar_widget(ui, p.avatar, false, 29.0); ui.label(&p.name); });
                         for kind in ["ability", "ability2"] {
                             let card = p.cards.iter().find(|c| c.kind == kind);
                             ui.horizontal(|ui| {
@@ -769,7 +766,7 @@ impl BunkerApp {
         ui.vertical_centered(|ui| {
             ui.label(format!("Осталось участников: {}", room.players.iter().filter(|p| p.active).count()));
             for p in room.players.iter().filter(|p| p.active) {
-                ui.horizontal(|ui| { Self::avatar_widget(ui, p.avatar, false, 29.0, &self.avatar_images); ui.label(&p.name); });
+                ui.horizontal(|ui| { self.avatar_widget(ui, p.avatar, false, 29.0); ui.label(&p.name); });
             }
             if ui.add(self.theme.accent_button("Оценка выживаемости · WIP")).clicked() {
                 self.show_survivability = true;
@@ -784,7 +781,7 @@ impl BunkerApp {
                 ui.label("Аватарки: папка avatars рядом с EXE, файлы 01.png–12.png. При отсутствии файла — цветной значок.");
                 egui::Grid::new("avatar-selector-grid").num_columns(self.layout.avatar_picker_columns.into()).spacing(self.theme.spacing.items).show(ui, |ui| {
                     for id in 1..=12 {
-                        if Self::avatar_widget(ui, id, self.avatar == Some(id), self.layout.avatar_picker_size, &self.avatar_images).clicked() {
+                        if self.avatar_widget(ui, id, self.avatar == Some(id), self.layout.avatar_picker_size).clicked() {
                             self.avatar = Some(id);
                             self.show_avatar_picker = false;
                         }
