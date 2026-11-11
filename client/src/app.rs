@@ -86,7 +86,7 @@ fn bunker_description(ui: &mut egui::Ui, text: &str, theme: &Theme) {
     for line in text.lines() {
         let mut job = egui::text::LayoutJob::default();
         let (label, value) = line.split_once(':').filter(|(label, _)| {
-            matches!(label, "Размер" | "Время проживания" | "Еда и вода" | "Внутри"
+            matches!(*label, "Размер" | "Время проживания" | "Еда и вода" | "Внутри"
                 | "Размер бункера" | "Время нахождения" | "Количество еды и воды" | "В бункере присутствует")
         }).map_or((None, line), |(label, value)| (Some(label), value));
         if let Some(label) = label {

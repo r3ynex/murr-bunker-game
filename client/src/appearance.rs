@@ -392,9 +392,7 @@ impl Theme {
                 FontWeight::Bold.font(self.fonts.heading),
             ),
         ] {
-            style
-                .text_styles
-                .insert(kind, egui::FontId::proportional(size));
+            style.text_styles.insert(kind, size);
         }
         ctx.set_style(style);
         warning
