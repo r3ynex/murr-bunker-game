@@ -1,4 +1,5 @@
-:root{color-scheme:dark;--bg:#10131b;--panel:#1a1f2a;--panel2:#252c38;--border:#354052;--text:#eff3fa;--muted:#a6b1c3;--accent:#9fc8ff;--accent-dark:#213957;--danger:#ffb3bc;font-family:system-ui,-apple-system,"Segoe UI",Arial,sans-serif}
+@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap");
+:root{color-scheme:dark;--bg:#10131b;--panel:#1a1f2a;--panel2:#252c38;--border:#354052;--text:#eff3fa;--muted:#a6b1c3;--accent:#9fc8ff;--accent-dark:#213957;--danger:#ffb3bc;font-family:"Manrope",system-ui,-apple-system,"Segoe UI",Arial,sans-serif}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font-size:15px;line-height:1.5}
 .shell{width:min(100%,900px);margin:0 auto;padding:16px 12px 46px}
@@ -44,3 +45,6 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere}
 footer{text-align:center;color:var(--muted);font-size:12px;padding:16px}
 [hidden]{display:none!important}
 @media(min-width:700px){.shell{padding:24px}.panel{padding:22px}.panel.wide{padding:24px}}
+
+:root{--room-background:none}
+#room{background-image:linear-gradient(to bottom,rgba(0,0,0,.75),rgba(0,0,0,.93)),var(--room-background);background-size:100% auto;background-position:center top;background-repeat:no-repeat}

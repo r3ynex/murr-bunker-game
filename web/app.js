@@ -75,7 +75,7 @@ async function startSession(join = false) {
   try {
     saveForm();
     const path = join ? "/api/rooms/" + code + "/join" : "/api/rooms";
-    session = await postJson(path, { name });
+    session = await postJson(path, { name, avatar: Number($("avatarChoice").value) || 1 });
     saveSession();
     connect();
   } catch (error) {
@@ -145,6 +145,7 @@ function updateConnection() {
 function render() {
   if (!room) return;
   const isHost = room.you === room.hostId;
+  updateBackground(room).catch(() => {});
   $("setup").hidden = true;
   $("room").hidden = false;
   $("roomCode").textContent = room.code;
@@ -161,7 +162,7 @@ function render() {
     addText(panel, "Для тестовой партии достаточно двух человек.", "p", "muted");
     const list = element("div", null, "list");
     for (const player of room.players) {
-      addText(list, (player.id === room.hostId ? "♛ " : "• ") + player.name, "div");
+      addText(list, `${player.id === room.hostId ? "♛" : "•"} ${player.name} · Аватар ${player.avatar || 1} · ${player.id === room.hostId || player.ready ? "Готов" : "Не готов"}`, "div");
     }
     panel.append(list);
     if (isHost) {
@@ -177,23 +178,40 @@ function render() {
         if (count.value !== "") send("set_seats", { seats: Number(count.value) });
       });
       line.append(addText(element("span"), "Мест:"), count);
-      addButton(line, "Начать игру", () => send("start"));
+      addButton(line, "Начать игру", () => send("start"), {
+        disabled: room.players.length < 2 || room.players.some(p => p.id !== room.hostId && !p.ready)
+      });
       panel.append(line);
       mount.append(panel);
       const editor = element("section", null, "panel");
       const details = element("details");
       const summary = element("summary", "Свой пак (JSON / импорт Бункер Онлайн)");
       details.append(summary);
-      addText(details, "Можно вставить готовый .json или экспорт Бункер Онлайн. Для редактирования по разделам используй папку packs/ и сборщик tools/pack.mjs.", "p", "muted tiny");
+      addText(details, "JSON содержит секции roles, characteristics, items, world. ZIP — pack.json + изображения assets/. До старта ZIP можно отправить всем участникам без ручной установки.", "p", "muted tiny");
       const file = element("input");
       file.type = "file";
-      file.accept = "application/json,.json";
+      file.accept = "application/json,.json,application/zip,.zip";
       const area = element("textarea");
       area.placeholder = '{"formatVersion":2,"name":"Мой пак","categories":{"profession":{"cards":[{"title":"Инженер","stage":"Опытный"}]}}}';
       area.setAttribute("aria-label", "JSON пака");
       file.addEventListener("change", async () => {
         try {
-          if (file.files?.[0]) area.value = await file.files[0].text();
+          if (file.files?.[0]) {
+            const selected = file.files[0];
+            if (selected.name.toLowerCase().endsWith(".zip")) {
+              if (selected.size > 2000000) throw Error("ZIP не должен превышать 2 МБ");
+              const response = await fetch(getBase() + `/api/rooms/${room.code}/bundle`, {
+                method: "POST", headers: {"authorization": `Bearer ${session.token}`,
+                  "content-type":"application/zip"}, body: selected
+              });
+              const answer = await response.json();
+              if (!response.ok) throw Error(answer.error || "Не удалось отправить ZIP");
+              setStatus("ZIP-пак загружен для всей комнаты: " + answer.packName);
+              area.value = "";
+            } else {
+              area.value = await selected.text();
+            }
+          }
         } catch (err) { setStatus(err.message, true); }
       });
       details.append(file, area);
@@ -212,7 +230,9 @@ function render() {
       editor.append(details);
       mount.append(editor);
     } else {
-      addText(panel, "Ожидаем запуска ведущим.", "p", "muted");
+      const me = room.players.find(p => p.id === room.you);
+      addButton(panel, me?.ready ? "Не готов" : "Готов", () => send("set_ready", {ready: !me?.ready}));
+      addText(panel, "Ведущий начнёт партию, когда готовы все.", "p", "muted");
       mount.append(panel);
     }
     return;
@@ -229,6 +249,7 @@ function render() {
   addText(scenario, "Сценарий", "h2");
   addText(scenario, "Катаклизм: " + room.catastrophe, "p", "multiline");
   addText(scenario, "Бункер: " + room.bunker, "p", "multiline");
+  addText(scenario, `События: WIP · шанс ${room.eventChance ?? 0}%`, "p", "muted");
   const actions = element("div", null, "actions");
   if (isHost) {
     addButton(actions, "Следующий раунд", () => send("next_round"));
@@ -292,6 +313,24 @@ function render() {
   for (const message of room.log) addText(list, message, "li");
   log.append(list);
   mount.append(log);
+}
+let loadedBackground = "";
+let currentBackgroundUrl = null;
+async function updateBackground(state) {
+  const sha = state.bundle?.sha256;
+  if (!sha || loadedBackground === sha || !session) return;
+  loadedBackground = sha;
+  try {
+    const response = await fetch(getBase() + '/api/rooms/' + state.code + '/background', {
+      headers: { authorization: 'Bearer ' + session.token }
+    });
+    if (!response.ok) return;
+    if (currentBackgroundUrl) URL.revokeObjectURL(currentBackgroundUrl);
+    currentBackgroundUrl = URL.createObjectURL(await response.blob());
+    document.documentElement.style.setProperty('--room-background', 'url("' + currentBackgroundUrl + '")');
+  } catch {
+    // A missing optional background should not prevent the game from working.
+  }
 }
 const labels = {
   gender: "Пол и возраст", body: "Телосложение", personality: "Характер",
