@@ -106,11 +106,12 @@ fn scroll_to_section(ui: &egui::Ui, top: f32) {
     );
 }
 
-fn bunker_description(ui: &mut egui::Ui, text: &str, theme: &Theme) {
+fn bunker_description(text: &str, theme: &Theme, width: f32) -> Vec<(egui::text::LayoutJob, f32)> {
     let regular = egui::TextFormat::simple(FontWeight::Regular.font(theme.fonts.bunker_body), theme.palette.text.color());
     let accent = egui::TextFormat::simple(FontWeight::SemiBold.font(theme.fonts.bunker_body), theme.palette.accent_title.color());
     let mut stats_started = false;
-    for line in text.lines() {
+    text.lines().map(|line| {
+        let mut gap = 0.0;
         let mut job = egui::text::LayoutJob::default();
         let (label, value) = line.split_once(':').unwrap_or(("", line));
         let display = match label {
@@ -122,7 +123,7 @@ fn bunker_description(ui: &mut egui::Ui, text: &str, theme: &Theme) {
         };
         if let Some((title, separator)) = display {
             if !stats_started {
-                ui.add_space(theme.spacing.heading_gap);
+                gap = theme.spacing.heading_gap;
                 stats_started = true;
             }
             job.append(title, 0.0, accent.clone());
@@ -132,8 +133,9 @@ fn bunker_description(ui: &mut egui::Ui, text: &str, theme: &Theme) {
         } else {
             job.append(if label == "Описание" { value.trim_start() } else { line }, 0.0, regular.clone());
         }
-        ui.add(egui::Label::new(job).wrap());
-    }
+        job.wrap.max_width = width;
+        (job, gap)
+    }).collect()
 }
 
 fn card_text(text: &str) -> String {
@@ -760,19 +762,50 @@ impl BunkerApp {
             paint_cover(&ui.painter_at(rect), texture, drawing);
         }
         let margin = (0.083 * width).max(f32::from(self.layout.panel_padding));
-        let content = egui::Rect::from_min_size(
-            egui::pos2(rect.left() + margin, rect.top() + 0.24 * height),
-            egui::vec2((width * 0.68 - margin).max(100.0), height * 0.72),
+        let content_width = (width * 0.68 - margin).max(100.0);
+        let color = self.theme.palette.text.color();
+        let heading = ui.painter().layout(
+            "Информация о бункере".into(), FontWeight::Bold.font(self.theme.fonts.heading), color, content_width,
         );
-        let mut body = ui.new_child(egui::UiBuilder::new().max_rect(content));
-        body.set_clip_rect(rect.intersect(ui.clip_rect()));
-        body.label(FontWeight::Bold.text(self.theme.fonts.heading, "Информация о бункере"));
-        body.add_space(self.theme.spacing.heading_gap);
-        egui::ScrollArea::vertical().id_salt("bunker-description").max_height(height * 0.51).show(&mut body, |ui| {
-            bunker_description(ui, &room.bunker, &self.theme);
+        let seats = ui.painter().layout(
+            format!("Количество мест: {}", room.seats), FontWeight::Bold.font(self.theme.fonts.bunker_seats),
+            color, content_width,
+        );
+        let spacing = ui.spacing().item_spacing.y;
+        let mut paragraphs = bunker_description(&room.bunker, &self.theme, content_width);
+        let paragraphs = ui.fonts_mut(|fonts| {
+            paragraphs.drain(..).map(|(job, gap)| (fonts.layout_job(job), gap)).collect::<Vec<_>>()
         });
+        let natural_height = paragraphs.iter().map(|(text, gap)| text.size().y + gap + spacing).sum::<f32>();
+        let natural_height = (natural_height - spacing).max(0.0);
+        let fixed = heading.size().y + self.theme.spacing.heading_gap + 16.0 + seats.size().y;
+        let max_description = (height - fixed - 2.0 * f32::from(self.layout.panel_padding)).max(1.0);
+        let description_height = natural_height.min(max_description);
+        let content_height = fixed + description_height;
+        let content = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + margin, rect.center().y - content_height / 2.0),
+            egui::vec2(content_width, content_height),
+        );
+        let mut body = ui.new_child(egui::UiBuilder::new().max_rect(content)
+            .layout(egui::Layout::top_down(egui::Align::Min)));
+        body.set_clip_rect(rect.intersect(ui.clip_rect()));
+        body.spacing_mut().item_spacing.y = 0.0;
+        body.add(egui::Label::new(heading));
+        body.add_space(self.theme.spacing.heading_gap);
+        if !paragraphs.is_empty() {
+            egui::ScrollArea::vertical().id_salt("bunker-description").max_height(description_height)
+                .show(&mut body, |ui| {
+                    let mut first = true;
+                    for (text, gap) in paragraphs {
+                        if !first { ui.add_space(spacing); }
+                        first = false;
+                        ui.add_space(gap);
+                        ui.add(egui::Label::new(text));
+                    }
+                });
+        }
         body.add_space(16.0);
-        body.label(FontWeight::Bold.text(self.theme.fonts.bunker_seats, format!("Количество мест: {}", room.seats)));
+        body.add(egui::Label::new(seats));
     }
 
     fn event_section(&mut self, ui: &mut egui::Ui, room: &Room) {
@@ -887,8 +920,11 @@ impl BunkerApp {
                 let rect = egui::Rect::from_center_size(center, egui::Vec2::splat(DOSSIER_INFO_SIZE));
                 let color = self.theme.palette.accent_title.color();
                 ui.painter().circle_stroke(center, DOSSIER_INFO_SIZE / 2.0 - 1.0, Stroke::new(1.0_f32, color));
-                ui.painter().text(center, egui::Align2::CENTER_CENTER, "!", FontWeight::Bold.font(11.0), color);
-                ui.interact(rect, ui.next_auto_id().with("description"), egui::Sense::hover()).on_hover_text(description);
+                let info = egui::Button::new(FontWeight::Bold.text(11.0, "!").color(color))
+                    .frame(false).min_size(rect.size());
+                let response = ui.place(rect, info);
+                egui::Popup::menu(&response).show(|ui| { ui.label(description); });
+                response.on_hover_text(description);
                 value_right = rect.left() - DOSSIER_GAP;
             }
             let name_rect = egui::Rect::from_min_size(
@@ -946,7 +982,10 @@ impl BunkerApp {
         let header_size = self.theme.fonts.table_heading * scale;
         let text_size = self.theme.fonts.table_body * scale;
         let line = self.theme.palette.button.color();
-        ui.vertical_centered(|ui| {
+        let offset = (ui.available_width() - body_width) / 2.0;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_space(offset);
             egui::ScrollArea::horizontal().id_salt(id).max_width(body_width).auto_shrink([false, true]).show(ui, |ui| {
                 egui::Grid::new(id).spacing([0.0, 0.0]).show(ui, |ui| {
                     ui.add_sized([player_width, header_height], egui::Label::new(FontWeight::SemiBold.text(header_size, "Игрок")));
@@ -961,53 +1000,74 @@ impl BunkerApp {
                     }
                     for player in &room.players {
                         ui.end_row();
-                        table_cell(ui, [player_width, cell[1]], line, |ui| {
+                        let fill = if player.active {
+                            Color32::TRANSPARENT
+                        } else {
+                            self.theme.palette.surface.color()
+                        };
+                        table_cell(ui, [player_width, cell[1]], line, fill, |ui| {
                             let avatar_size = (35.0 * scale).min(ui.available_height());
                             self.avatar_widget(ui, player.avatar, false, avatar_size);
                             let rect = ui.max_rect();
                             let left = ui.next_widget_position().x;
                             let width = (rect.right() - left).max(1.0);
                             let label_height = text_size * 1.45;
+                            let has_action = host || !player.active;
+                            let group_height = if has_action { 2.0 * label_height } else { label_height };
                             let name_rect = egui::Rect::from_min_size(
-                                egui::pos2(left, rect.center().y - label_height / 2.0),
+                                egui::pos2(left, rect.center().y - group_height / 2.0),
                                 egui::vec2(width, label_height),
                             );
                             let mut name_ui = ui.new_child(egui::UiBuilder::new().max_rect(name_rect)
                                 .layout(egui::Layout::left_to_right(egui::Align::Center)));
                             name_ui.add(egui::Label::new(FontWeight::Medium.text(text_size, &player.name)).truncate())
                                 .on_hover_text(&player.name);
-                            let action_rect = name_rect.translate(egui::vec2(0.0, label_height));
-                            let mut action_ui = ui.new_child(egui::UiBuilder::new().max_rect(action_rect)
-                                .layout(egui::Layout::left_to_right(egui::Align::Center)));
-                            if host && player.id != room.host_id {
-                                let (label, color) = if player.active {
-                                    ("Выгнать", self.theme.palette.negative.color())
+                            if has_action {
+                                let action_rect = name_rect.translate(egui::vec2(0.0, label_height));
+                                let mut action_ui = ui.new_child(egui::UiBuilder::new().max_rect(action_rect)
+                                    .layout(egui::Layout::left_to_right(egui::Align::Center)));
+                                if host {
+                                    let (label, color) = if player.active {
+                                        ("Выгнать", self.theme.palette.negative.color())
+                                    } else {
+                                        ("Вернуть", self.theme.palette.positive.color())
+                                    };
+                                    let action = egui::Button::new(FontWeight::Medium.text(text_size, label).color(color)).frame(false);
+                                    if action_ui.add(action).clicked() {
+                                        self.send(json!({"type":"set_active","playerId":player.id,"active":!player.active}));
+                                    }
                                 } else {
-                                    ("Вернуть", self.theme.palette.positive.color())
-                                };
-                                let action = egui::Button::new(FontWeight::Medium.text(text_size, label).color(color)).frame(false);
-                                if action_ui.add(action).clicked() {
-                                    self.send(json!({"type":"set_active","playerId":player.id,"active":!player.active}));
+                                    action_ui.label(FontWeight::Medium.text(text_size, "Выбыл").color(self.theme.palette.negative.color()));
                                 }
-                            } else if !player.active {
-                                action_ui.label(FontWeight::Medium.text(text_size, "Выбыл").color(self.theme.palette.negative.color()));
                             }
                         });
                         for &kind in keys {
                             let card = player.revealed_card(kind);
-                            table_cell(ui, cell, line, |ui| {
+                            table_cell(ui, cell, line, fill, |ui| {
+                                let width = ui.available_width();
+                                let edit_size = (18.0 * scale).min(width * 0.4);
                                 if host {
-                                    let icon = self.artwork.button(Icon::Edit, &self.theme.icons.edit, 13.0 * scale).frame(false);
-                                    if ui.add(icon).on_hover_text("Изменить карточку").clicked() {
+                                    let rect = ui.max_rect();
+                                    let edit_rect = egui::Rect::from_center_size(
+                                        egui::pos2(rect.right() - edit_size / 2.0, rect.center().y),
+                                        egui::Vec2::splat(edit_size),
+                                    );
+                                    let icon = self.artwork.button(Icon::Edit, &self.theme.icons.edit, edit_size * 0.72).frame(false);
+                                    let response = ui.place(edit_rect, |ui: &mut egui::Ui| {
+                                        ui.multiply_opacity(0.5);
+                                        ui.add(icon)
+                                    });
+                                    if response.on_hover_text("Изменить карточку").clicked() {
                                         self.edit_card(&player.id, kind, card.map(|card| card.value.as_str()).unwrap_or(""));
                                     }
                                 }
                                 if let Some(card) = card {
-                                    ui.add(egui::Label::new(FontWeight::Medium.text(text_size, card_text(&card.value))).wrap()).on_hover_text(&card.value);
-                                } else if let Some(icon) = self.artwork.icon(Icon::Locked, 12.0 * scale) {
-                                    ui.add(icon).on_hover_text("Закрыто");
-                                } else {
-                                    ui.label(FontWeight::Medium.text(text_size, "Закрыто"));
+                                    let text_width = if host { (width - edit_size - 4.0).max(1.0) } else { width };
+                                    let rect = egui::Rect::from_min_size(ui.max_rect().min, egui::vec2(text_width, ui.max_rect().height()));
+                                    let mut text_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect)
+                                        .layout(egui::Layout::left_to_right(egui::Align::Center)));
+                                    text_ui.add(egui::Label::new(FontWeight::Medium.text(text_size, card_text(&card.value))).wrap())
+                                        .on_hover_text(&card.value);
                                 }
                             });
                         }

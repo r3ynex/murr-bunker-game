@@ -260,8 +260,15 @@ pub fn input_row(
     )
 }
 
-pub fn table_cell(ui: &mut Ui, size: [f32; 2], color: Color32, contents: impl FnOnce(&mut Ui)) {
+pub fn table_cell(
+    ui: &mut Ui,
+    size: [f32; 2],
+    color: Color32,
+    fill: Color32,
+    contents: impl FnOnce(&mut Ui),
+) {
     let (rect, _) = ui.allocate_exact_size(size.into(), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0u8, fill);
     ui.painter().rect_stroke(
         rect,
         0u8,
