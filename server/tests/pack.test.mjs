@@ -13,7 +13,9 @@ import { checkPack, convertPack, createTemplate } from "../../tools/pack.mjs";
 const starter = fileURLToPath(new URL("../../packs/starter.json", import.meta.url));
 const example = JSON.parse(readFileSync(starter, "utf8"));
 
-test("demo pack has all eleven basic categories", () => {
+test("Бункер 6 is the base pack with all eleven categories", () => {
+  assert.equal(DEFAULT_PACK.name, "Бункер 6");
+  assert.equal(DEFAULT_PACK.categoryOrder.reduce((total, kind) => total + DEFAULT_PACK.categories[kind].length, 0), 112);
   assert.equal(CATEGORIES.length, 11);
   for (const kind of CATEGORIES) assert.ok(DEFAULT_PACK.categories[kind].length >= 3, kind);
 });
@@ -21,7 +23,7 @@ test("demo pack has all eleven basic categories", () => {
 test("legacy v1 simple packs work and fill missing sections", () => {
   const pack = normalizePack({ name: "My pack", categories: { profession: ["Картограф"] } });
   assert.deepEqual(pack.categories.profession, [{ title: "Картограф" }]);
-  assert.deepEqual(pack.categories.health, DEFAULT_PACK.categories.health);
+  assert.deepEqual(pack.categories.health, normalizePack({}).categories.health);
   assert.equal(drawCard(pack, "profession").value, "Картограф");
   assert.ok(drawScenario(pack).bunker.includes("Описание"));
 });
@@ -35,10 +37,9 @@ test("single JSON v2 has meaningful sections", () => {
   assert.ok(example.items.backpack);
   assert.ok(example.world.catastrophes);
   assert.ok(example.world.bunker);
-  assert.ok(example.customCategories.talent);
   const pack = normalizePack(example);
   assert.equal(pack.name, "Murr: Первое убежище");
-  assert.equal(pack.categoryLabels.talent, "Скрытый талант");
+  assert.ok(!pack.categoryOrder.includes("talent"));
   assert.equal(pack.bunker.location.length, 2);
   assert.equal(pack.categories.profession[0].stage, "Опытный");
   assert.equal(pack.categories.equipment[1].weight, 3);
@@ -53,7 +54,8 @@ test("age, height, descriptions, custom categories and scenario render", () => {
     roles: { profession: [{ title: "Штурман", stage: "Эксперт", description: "Читает карты" }] },
     characteristics: {
       gender: [{ title: "Исследователь", age1: 31, age2: 31 }],
-      body: [{ title: "Подвижный", height1: 170, height2: 170 }]
+      body: [{ title: "Подвижный", height1: 170, height2: 170 }],
+      hobby: [{ title: "Садоводство", stage: "Любитель" }]
     },
     customCategories: { relic: { label: "Реликвия", cards: [{ title: "Компас", tags: ["редкость"] }] } },
     world: {
@@ -65,7 +67,9 @@ test("age, height, descriptions, custom categories and scenario render", () => {
   assert.ok(pack.categoryOrder.includes("relic"));
   assert.equal(drawCard(pack, "gender").value, "Исследователь\n31 лет");
   assert.equal(drawCard(pack, "body").value, "Подвижный\n170 см");
-  assert.equal(drawCard(pack, "profession").value, "Штурман\nСтаж: Эксперт\nЧитает карты");
+  assert.equal(drawCard(pack, "profession").value, "Штурман (Эксперт)\nЧитает карты");
+  assert.equal(drawCard(pack, "hobby").value, "Садоводство (Любитель)");
+  assert.equal(drawCard(pack, "profession").description, "Читает карты");
   assert.equal(pack.categories.relic[0].tags[0], "редкость");
   const scenario = drawScenario(pack);
   assert.ok(scenario.catastrophe.includes("Связь нестабильна"));

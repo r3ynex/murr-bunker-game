@@ -1,0 +1,78 @@
+{
+  "palette": {
+    "background": [3, 3, 3],
+    "panel": [23, 23, 23],
+    "surface": [19, 19, 19],
+    "status": [3, 3, 3],
+    "button": [61, 61, 61],
+    "hover": [79, 67, 53],
+    "pressed": [100, 71, 39],
+    "selection": [132, 87, 39],
+    "text": [245, 245, 245],
+    "muted": [156, 156, 164],
+    "accent": [236, 137, 21],
+    "accent_text": [255, 255, 255],
+    "positive": [56, 255, 72],
+    "negative": [229, 37, 32],
+    "hero": [3, 3, 3],
+    "outline": [108, 76, 34],
+    "accent_end": [255, 177, 86],
+    "accent_title": [255, 177, 86],
+    "input": [33, 35, 36],
+    "ready": [0, 165, 179],
+    "ready_end": [10, 100, 65]
+  },
+  "fonts": {
+    "family": "manrope",
+    "file": null,
+    "body": 17,
+    "button": 18,
+    "small": 12,
+    "heading": 28,
+    "title": 33.33,
+    "icon": 22,
+    "welcome_caption": 17.33,
+    "input": 18.67,
+    "profile_name": 23,
+    "lobby_heading": 24.4,
+    "lobby_count": 18,
+    "lobby_name": 21.6,
+    "lobby_side_button": 13.86,
+    "avatar_caption": 13.33,
+    "hero_body": 15.33,
+    "bunker_body": 16.67,
+    "bunker_seats": 30,
+    "dossier": 13.33,
+    "table_heading": 9.33,
+    "table_body": 8.67
+  },
+  "buttons": {
+    "accent_size": [155, 38],
+    "menu_size": [245, 51],
+    "navigation_size": [32, 32],
+    "padding": [8, 4],
+    "radius": 0
+  },
+  "spacing": {
+    "items": [16, 8],
+    "heading_gap": 10,
+    "section_gap": 0
+  },
+  "icons": {
+    "join": "",
+    "create": "",
+    "settings": "",
+    "host": "♛",
+    "locked": "🔒",
+    "unlocked": "🔓",
+    "edit": "⋯",
+    "navigation": [
+      "⚠",
+      "⌂",
+      "✧",
+      "▤",
+      "☷",
+      "★"
+    ]
+  }
+}

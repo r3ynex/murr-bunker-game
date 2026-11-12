@@ -187,7 +187,7 @@ export class Room extends DurableObject {
         id: p.id, name: p.name, avatar: p.avatar || 1,
         ready: p.ready ?? (p.id === state.hostId), active: p.active,
         cards: p.cards.filter(c => p.id === viewerId || c.revealed)
-          .map(c => ({ kind: c.kind, value: c.value, revealed: c.revealed }))
+          .map(c => ({ kind: c.kind, value: c.value, revealed: c.revealed, description: c.description }))
       }))
     };
   }
@@ -245,6 +245,9 @@ export class Room extends DurableObject {
         state.round = 1;
         const scenario = drawScenario(state.pack);
         state.catastrophe = scenario.catastrophe;
+        if (state.bundle && scenario.background !== undefined) {
+          state.bundle.background = scenario.background;
+        }
         state.bunker = scenario.bunker;
         state.players.forEach(p => {
           p.active = true;
@@ -271,6 +274,7 @@ export class Room extends DurableObject {
             throw Error("Текст карты от 1 до 2000 символов");
           }
           card.value = data.value.trim();
+          card.description = "";
         } else if (data.type === "host_reveal_card") {
           card.revealed = true;
         } else {
@@ -278,6 +282,7 @@ export class Room extends DurableObject {
           if (!state.pack.categories[category]) throw Error("Категория не найдена");
           const fresh = drawCard(state.pack, category);
           card.value = fresh.value;
+          card.description = fresh.description;
           // Preserve visibility; never secretly hide a card that was already revealed.
         }
         this.note(state, "Ведущий изменил карточку игрока " + player.name);

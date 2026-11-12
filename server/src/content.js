@@ -1,5 +1,7 @@
 // Murr Pack v2: compact, data-only bundles produced from editable pack folders.
 // No user content is evaluated as code. Legacy v1 and Bunker Online exports remain importable.
+import basePack from "../../packs/bunker-6.json" with { type: "json" };
+
 export const CATEGORIES = [
   "gender", "body", "personality", "profession", "health", "hobby",
   "fear", "equipment", "backpack", "fact", "ability"
@@ -146,7 +148,7 @@ function slimOriginal(entry) {
   if (typeof entry === "string") return entry;
   if (!record(entry)) throw Error("Некорректная запись экспорта");
   const result = { title: entry.title };
-  for (const key of ["description", "stage", "age1", "age2", "height1", "height2", "timer"]) {
+  for (const key of ["description", "stage", "age1", "age2", "height1", "height2", "timer", "image"]) {
     if (entry[key] !== undefined && entry[key] !== null) result[key] = entry[key];
   }
   if (entry.id !== undefined) result.id = String(entry.id);
@@ -251,7 +253,18 @@ export function normalizePack(source) {
   if (!v2) for (const key of Object.keys(inputCategories)) {
     if (!CATEGORIES.includes(key)) throw Error("Неизвестная категория: " + key);
   }
-  const catastrophes = cleanEntries(input.catastrophes ?? DEFAULT_INPUT.catastrophes, "Катаклизмы", 200);
+  const rawCatastrophes = input.catastrophes ?? DEFAULT_INPUT.catastrophes;
+  const catastrophes = cleanEntries(rawCatastrophes, "Катаклизмы", 200);
+  for (let i = 0; i < catastrophes.length; i++) {
+    const image = field(rawCatastrophes[i]?.image, "изображение катаклизма", 240);
+    if (image) {
+      const asset = image.startsWith("assets/") ? image : "assets/" + image;
+      if (!/^assets\/[a-zA-Z0-9_./-]+\.(png|jpe?g|webp)$/i.test(asset) || asset.includes("..") || asset.includes("//")) {
+        throw Error("Изображение катаклизма должно быть PNG, JPG или WebP в assets/");
+      }
+      catastrophes[i].image = asset;
+    }
+  }
   let bunkerInput;
   if (v2 && input.bunker !== undefined) {
     if (!record(input.bunker)) throw Error("bunker должен быть объектом");
@@ -274,7 +287,7 @@ export function normalizePack(source) {
     catastrophes, bunker
   };
 }
-export const DEFAULT_PACK = normalizePack(DEFAULT_INPUT);
+export const DEFAULT_PACK = normalizePack(basePack);
 
 const randomFraction = () => crypto.getRandomValues(new Uint32Array(1))[0] / 4294967296;
 export function pickEntry(entries) {
@@ -301,17 +314,16 @@ export function drawCard(pack, kind) {
   if (kind === "body" && entry.height1 !== undefined) {
     details.push(randomInt(entry.height1, entry.height2) + " см");
   }
-  if (entry.stage) {
-    const label = kind === "profession" ? "Стаж" : kind === "health" ? "Степень" : "Уровень/примечание";
-    details.push(label + ": " + entry.stage);
-  }
-  return { kind, value: [entry.title, ...details, entry.description].filter(Boolean).join("\n"), revealed: false };
+  const title = entry.stage ? entry.title + " (" + entry.stage + ")" : entry.title;
+  return { kind, value: [title, ...details, entry.description].filter(Boolean).join("\n"),
+    revealed: false, description: entry.description ?? "" };
 }
 export function drawScenario(pack) {
-  const catastrophe = formatted(pickEntry(pack.catastrophes));
+  const selected = pickEntry(pack.catastrophes);
+  const catastrophe = formatted(selected);
   const lines = [];
   for (const [key, label] of Object.entries(BUNKER_LABELS)) {
     if (pack.bunker[key]?.length) lines.push(label + ": " + formatted(pickEntry(pack.bunker[key])));
   }
-  return { catastrophe, bunker: lines.join("\n") };
+  return { catastrophe, bunker: lines.join("\n"), background: selected.image };
 }
