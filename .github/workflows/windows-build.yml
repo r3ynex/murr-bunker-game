@@ -42,13 +42,15 @@ jobs:
         working-directory: client
         run: cargo build --release
 
-      - name: Bundle executable, demo pack and appearance settings
+      - name: Bundle executable, packs and appearance settings
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item client/target/release/murr-bunker-game.exe dist/Murr-Bunker.exe
-          Copy-Item packs/therudygames-bunker-6.json dist/pack-example.json
-          Copy-Item packs dist/packs -Recurse
+          New-Item -ItemType Directory -Force -Path dist/packs | Out-Null
+          if (Test-Path -LiteralPath packs -PathType Container) {
+            Get-ChildItem -LiteralPath packs -File -Force | Where-Object { $_.Extension -in '.json', '.zip' } | Copy-Item -Destination dist/packs -Force
+          }
           Copy-Item client/theme.json, client/layout.json, client/APPEARANCE.md -Destination dist
           Copy-Item client/assets/icons dist/icons -Recurse
           Copy-Item client/assets/fonts/Manrope-OFL.txt -Destination dist

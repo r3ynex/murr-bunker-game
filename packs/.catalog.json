@@ -1,0 +1,9 @@
+{
+  "default": "therudygames-bunker-6",
+  "legacy_ids": {
+    "bunker-4": "therudygames-bunker-4",
+    "bunker-5": "therudygames-bunker-5",
+    "bunker-6": "therudygames-bunker-6",
+    "bunker-space": "therudygames-bunker-7"
+  }
+}

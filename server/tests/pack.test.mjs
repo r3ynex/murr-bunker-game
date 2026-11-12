@@ -13,11 +13,11 @@ import { checkPack, convertPack, createTemplate } from "../../tools/pack.mjs";
 const starter = fileURLToPath(new URL("../../packs/starter.json", import.meta.url));
 const example = JSON.parse(readFileSync(starter, "utf8"));
 
-test("Бункер 6 is the base pack with all eleven categories", () => {
-  assert.equal(DEFAULT_PACK.name, "[TheRudyGames] Бункер 6");
-  assert.equal(DEFAULT_PACK.categoryOrder.reduce((total, kind) => total + DEFAULT_PACK.categories[kind].length, 0), 112);
+test("rooms without an uploaded pack can draw a full demo game", () => {
   assert.equal(CATEGORIES.length, 11);
-  for (const kind of CATEGORIES) assert.ok(DEFAULT_PACK.categories[kind].length >= 3, kind);
+  for (const kind of CATEGORIES) assert.ok(drawCard(DEFAULT_PACK, kind).value, kind);
+  const scenario = drawScenario(DEFAULT_PACK);
+  assert.ok(scenario.catastrophe && scenario.bunker);
 });
 
 test("legacy v1 simple packs work and fill missing sections", () => {

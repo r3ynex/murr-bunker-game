@@ -6,31 +6,24 @@ use std::fs::{self, File};
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
-pub const BASE: &str = include_str!("../../packs/therudygames-bunker-6.json");
-const BUILTIN: [(&str, &str); 4] = [
-    ("bunker-6", BASE),
-    (
-        "bunker-4",
-        include_str!("../../packs/therudygames-bunker-4.json"),
-    ),
-    (
-        "bunker-5",
-        include_str!("../../packs/therudygames-bunker-5.json"),
-    ),
-    (
-        "bunker-space",
-        include_str!("../../packs/therudygames-bunker-7.json"),
-    ),
-];
 const MAX_JSON: u64 = 500_000;
 const MAX_ZIP: u64 = 2_000_000;
 const MAX_UNPACKED: u64 = 6_000_000;
-const MAX_PACKS: usize = 24;
+const MAX_EXTERNAL_PACKS: usize = 24;
+const CATALOG_FILE: &str = ".catalog.json";
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct Catalog {
+    default: Option<String>,
+    legacy_ids: BTreeMap<String, String>,
+}
 
 #[derive(Deserialize, Serialize)]
 struct Selection {
     path: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // Older settings referred to embedded packs by ID.
+    #[serde(default, skip_serializing)]
     builtin: Option<String>,
     active: bool,
 }
@@ -52,7 +45,7 @@ impl Entry {
             .ok()
             .and_then(|pack| pack.name())
             .or_else(|| self.selection.path.as_ref()?.file_name()?.to_str())
-            .unwrap_or("Бункер 6")
+            .unwrap_or("Пак")
     }
 
     pub fn error(&self) -> Option<&str> {
@@ -64,29 +57,33 @@ impl Entry {
     pub fn toggle(&mut self) {
         self.selection.active = !self.selection.active;
     }
-    pub fn reload(&mut self) {
-        self.data = Self::read(
-            self.selection.path.as_deref(),
-            self.selection.builtin.as_deref(),
-        );
-    }
-
-    fn read(path: Option<&Path>, builtin: Option<&str>) -> Result<Pack, String> {
-        match path {
-            Some(path) => Pack::load(path),
-            None => Ok(Pack {
-                json: serde_json::from_str(
-                    BUILTIN
-                        .iter()
-                        .find(|(key, _)| *key == builtin.unwrap_or("bunker-6"))
-                        .map(|(_, source)| *source)
-                        .unwrap_or(BASE),
-                )
-                .expect("valid bundled pack"),
-                assets: BTreeMap::new(),
-            }),
+    fn new(path: PathBuf, directory: &Path) -> Self {
+        let data = Pack::load(&directory.join(&path));
+        Self {
+            selection: Selection {
+                path: Some(path),
+                builtin: None,
+                active: false,
+            },
+            data,
         }
     }
+}
+
+pub fn directory() -> PathBuf {
+    let directory = portable_path("packs");
+    if cfg!(debug_assertions) && !directory.exists() {
+        return Path::new(env!("CARGO_MANIFEST_DIR")).join("../packs");
+    }
+    directory
+}
+
+fn selection_path(path: PathBuf, directory: &Path) -> PathBuf {
+    path.strip_prefix(directory)
+        .ok()
+        .filter(|name| name.components().count() == 1)
+        .map(Path::to_path_buf)
+        .unwrap_or(path)
 }
 
 pub fn library() -> Vec<Entry> {
@@ -94,31 +91,90 @@ pub fn library() -> Vec<Entry> {
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Vec<Selection>>(&bytes).ok())
         .unwrap_or_default();
-    let builtins: Vec<_> = BUILTIN
-        .iter()
-        .map(|(id, _)| {
-            let active = saved
-                .iter()
-                .find(|entry| {
-                    entry.path.is_none() && entry.builtin.as_deref().unwrap_or("bunker-6") == *id
-                })
-                .map_or(*id == "bunker-6", |entry| entry.active);
-            Selection {
-                path: None,
-                builtin: Some((*id).to_owned()),
-                active,
+    load_library(&directory(), saved)
+}
+
+fn load_library(directory: &Path, saved: Vec<Selection>) -> Vec<Entry> {
+    let directory = directory
+        .canonicalize()
+        .unwrap_or_else(|_| directory.to_owned());
+    let catalog = read_file(&directory.join(CATALOG_FILE), 128_000)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Catalog>(&bytes).ok())
+        .unwrap_or_default();
+    let mut preferences = BTreeMap::new();
+    let mut legacy = Vec::new();
+    for selection in saved {
+        if let Some(path) = selection.path {
+            let path = selection_path(path, &directory);
+            preferences.insert(path, selection.active);
+        } else {
+            let id = match selection.builtin.as_deref() {
+                Some(id) => catalog.legacy_ids.get(id),
+                None => catalog.default.as_ref(),
+            };
+            if let Some(id) = id {
+                legacy.push((id.as_str(), selection.active));
             }
-        })
-        .collect();
-    builtins
+        }
+    }
+    let mut paths = fs::read_dir(&directory)
         .into_iter()
-        .chain(saved.into_iter().filter(|entry| entry.path.is_some()))
-        .take(MAX_PACKS)
-        .map(|selection| Entry {
-            data: Entry::read(selection.path.as_deref(), selection.builtin.as_deref()),
-            selection,
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter(|entry| !entry.file_name().eq_ignore_ascii_case(CATALOG_FILE))
+        .map(|entry| PathBuf::from(entry.file_name()))
+        .filter(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("json") || ext.eq_ignore_ascii_case("zip")
+                })
         })
-        .collect()
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.extend(
+        preferences
+            .keys()
+            .filter(|path| path.is_absolute())
+            .take(MAX_EXTERNAL_PACKS)
+            .cloned(),
+    );
+
+    let mut entries = Vec::new();
+    let mut preferred = None;
+    let mut first_valid = None;
+    let mut has_selection = false;
+    for path in paths {
+        let saved = preferences.get(&path).copied();
+        let mut entry = Entry::new(path, &directory);
+        let mut active = saved;
+        if let Ok(pack) = &entry.data {
+            let index = entries.len();
+            first_valid.get_or_insert(index);
+            if let Some(id) = pack.id() {
+                if catalog.default.as_deref() == Some(id) {
+                    preferred.get_or_insert(index);
+                }
+                active = active.or_else(|| {
+                    legacy
+                        .iter()
+                        .find(|(key, _)| *key == id)
+                        .map(|(_, active)| *active)
+                });
+            }
+        }
+        has_selection |= active.is_some();
+        entry.selection.active = active.unwrap_or(false);
+        entries.push(entry);
+    }
+    if !has_selection {
+        if let Some(index) = preferred.or(first_valid) {
+            entries[index].selection.active = true;
+        }
+    }
+    entries
 }
 
 pub fn save_library(entries: &[Entry]) -> Result<(), String> {
@@ -129,7 +185,13 @@ pub fn save_library(entries: &[Entry]) -> Result<(), String> {
 
 pub fn add(entries: &mut Vec<Entry>, path: &Path) -> Result<(), String> {
     let path = path.canonicalize().map_err(|e| e.to_string())?;
-    let data = Pack::load(&path)?;
+    let directory = directory();
+    let directory = directory.canonicalize().unwrap_or(directory);
+    let path = selection_path(path, &directory);
+    if path.as_os_str().eq_ignore_ascii_case(CATALOG_FILE) {
+        return Err("Это настройки списка паков".into());
+    }
+    let data = Pack::load(&directory.join(&path))?;
     if let Some(existing) = entries
         .iter_mut()
         .find(|entry| entry.selection.path.as_ref() == Some(&path))
@@ -137,8 +199,20 @@ pub fn add(entries: &mut Vec<Entry>, path: &Path) -> Result<(), String> {
         existing.data = Ok(data);
         existing.selection.active = true;
     } else {
-        if entries.len() == MAX_PACKS {
-            return Err("В списке может быть до 24 паков".into());
+        if path.is_absolute()
+            && entries
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .selection
+                        .path
+                        .as_deref()
+                        .is_some_and(Path::is_absolute)
+                })
+                .count()
+                >= MAX_EXTERNAL_PACKS
+        {
+            return Err("Можно добавить до 24 паков из других папок".into());
         }
         entries.push(Entry {
             selection: Selection {
@@ -178,6 +252,13 @@ fn parse(bytes: &[u8]) -> Result<Value, String> {
 }
 
 impl Pack {
+    fn id(&self) -> Option<&str> {
+        self.json
+            .pointer("/meta/id")
+            .or_else(|| self.json.get("id"))
+            .and_then(Value::as_str)
+    }
+
     pub fn name(&self) -> Option<&str> {
         self.json
             .pointer("/meta/name")
@@ -535,8 +616,14 @@ mod tests {
 
     #[test]
     fn combines_cards_and_keeps_each_catastrophe_image_with_its_pack() {
-        let mut base = Entry::read(None, None).unwrap();
-        base.assets.insert("assets/catastrophe.png".into(), vec![1]);
+        let base = Pack {
+            json: json!({
+                "formatVersion": 2,
+                "roles": {"profession": [{"title": "Купец"}]},
+                "world": {"catastrophes": [{"title": "First scenario"}]}
+            }),
+            assets: BTreeMap::from([("assets/catastrophe.png".into(), vec![1])]),
+        };
         let extra = Pack {
             json: json!({"spec":{"data":[{"title":"Test ability"}]},"profession":{"data":[{"title":"Test profession","stage":"Expert"}]},"catastrophe":{"data":[{"title":"Test scenario","image":"storm.jpg"},{"title":"No image","image":"absent.png"}]}}),
             assets: BTreeMap::from([("assets/storm.jpg".into(), vec![2])]),
@@ -558,5 +645,69 @@ mod tests {
         assert!(scenarios[2].get("image").is_none());
         let (_, zip) = merged.payload().unwrap();
         assert!(zip.is_some());
+    }
+
+    #[test]
+    fn rescans_pack_files_and_restores_portable_selection() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("murr-packs-{unique}"));
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("ignored.txt"), "{}").unwrap();
+        fs::write(directory.join("a.json"), r#"{"name":"First"}"#).unwrap();
+        fs::write(
+            directory.join(CATALOG_FILE),
+            r#"{"default":"preferred","legacy_ids":{"old-id":"preferred"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            directory.join("z.JSON"),
+            r#"{"meta":{"id":"preferred","name":"Preferred"}}"#,
+        )
+        .unwrap();
+
+        let first = load_library(&directory, Vec::new());
+        let legacy = load_library(
+            &directory,
+            vec![Selection {
+                path: None,
+                builtin: Some("old-id".into()),
+                active: false,
+            }],
+        );
+        let saved = first
+            .iter()
+            .map(|entry| &entry.selection)
+            .collect::<Vec<_>>();
+        let saved = serde_json::to_string(&saved).unwrap();
+        fs::remove_file(directory.join("a.json")).unwrap();
+        fs::write(directory.join("b.json"), r#"{"name":"New"}"#).unwrap();
+        let refreshed = load_library(&directory, serde_json::from_str(&saved).unwrap());
+        fs::remove_file(directory.join("b.json")).unwrap();
+        fs::remove_file(directory.join("z.JSON")).unwrap();
+        fs::remove_file(directory.join("ignored.txt")).unwrap();
+        fs::remove_file(directory.join(CATALOG_FILE)).unwrap();
+        fs::remove_dir(&directory).unwrap();
+
+        let states = |entries: Vec<Entry>| {
+            entries
+                .into_iter()
+                .map(|entry| (entry.name().to_owned(), entry.active()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            states(first),
+            [("First".to_owned(), false), ("Preferred".to_owned(), true)]
+        );
+        assert_eq!(
+            states(legacy),
+            [("First".to_owned(), false), ("Preferred".to_owned(), false)]
+        );
+        assert_eq!(
+            states(refreshed),
+            [("New".to_owned(), false), ("Preferred".to_owned(), true)]
+        );
     }
 }

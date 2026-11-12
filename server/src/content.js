@@ -1,6 +1,5 @@
 // Murr Pack v2: compact, data-only bundles produced from editable pack folders.
 // No user content is evaluated as code. Legacy v1 and Bunker Online exports remain importable.
-import basePack from "../../packs/therudygames-bunker-6.json" with { type: "json" };
 
 export const CATEGORIES = [
   "gender", "body", "personality", "profession", "health", "hobby",
@@ -287,7 +286,7 @@ export function normalizePack(source) {
     catastrophes, bunker
   };
 }
-export const DEFAULT_PACK = normalizePack(basePack);
+export const DEFAULT_PACK = normalizePack(DEFAULT_INPUT);
 
 const randomFraction = () => crypto.getRandomValues(new Uint32Array(1))[0] / 4294967296;
 export function pickEntry(entries) {
