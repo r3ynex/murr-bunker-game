@@ -6,6 +6,7 @@ use crate::network;
 use crate::motion::{animated_button, button_highlight, modal_opacity, screen_opacity};
 use eframe::egui::{self, Color32, RichText, Stroke};
 use crate::network::{WsEvent, WsSender};
+use crate::survivability::Assessment;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
@@ -143,7 +144,7 @@ pub struct BunkerApp {
     show_create: bool,
     show_settings: bool,
     show_host_tools: bool,
-    show_survivability: bool,
+    assessment: Assessment,
     editor: Option<(String, String)>,
     editor_value: String,
     pending_section: Option<usize>,
@@ -190,7 +191,7 @@ impl BunkerApp {
             session: None, room: None, pending: None, sender: None, receiver: None, room_deadline: None, online: false,
             create_on_connect: false,
             show_avatar_picker: false, show_join: false, show_create: false,
-            show_settings: false, show_host_tools: false, show_survivability: false,
+            show_settings: false, show_host_tools: false, assessment: Assessment::default(),
             editor: None, editor_value: String::new(), pending_section: None, active_section: 0,
             dice_sides: 6, event_chance: 0,
             pack_json: None,
@@ -238,7 +239,8 @@ impl BunkerApp {
 
         let progress = (elapsed / FADE_IN).min((end - elapsed) / FADE_OUT).clamp(0.0, 1.0);
         let opacity = progress * progress * (3.0 - 2.0 * progress);
-        let bottom = f32::from(self.layout.status_margin) + 8.0;
+        let icon_space = if self.can_assess() { self.theme.buttons.navigation_size[1] + 12.0 } else { 0.0 };
+        let bottom = f32::from(self.layout.status_margin) + 8.0 + icon_space;
         egui::Area::new(egui::Id::new("status-toast"))
             .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(16.0, -bottom + 6.0 * (1.0 - opacity)))
             .order(egui::Order::Tooltip)
@@ -295,6 +297,7 @@ impl BunkerApp {
         self.online = false;
         self.session = None;
         self.room = None;
+        self.assessment = Assessment::default();
         self.clear_background();
         self.upload_pending = None;
         self.pack_upload_failed = false;
@@ -490,6 +493,7 @@ impl BunkerApp {
         if self.online { self.send(json!({"type":"leave"})); }
         self.stop_websocket();
         self.room = None;
+        self.assessment = Assessment::default();
         self.clear_background();
         self.session = None;
         self.online = false;
@@ -738,6 +742,25 @@ impl BunkerApp {
                         }
                     });
                 });
+            });
+    }
+
+    fn can_assess(&self) -> bool {
+        matches!(self.room.as_ref().map(|room| room.stage.as_str()), Some("playing" | "finished"))
+    }
+
+    fn survivability_button(&mut self, ctx: &egui::Context) {
+        egui::Area::new(egui::Id::new("survivability-button"))
+            .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(16.0, -16.0))
+            .order(egui::Order::Foreground)
+            .movable(false)
+            .show(ctx, |ui| {
+                let icon = self.artwork.button(Icon::Survivability, "✓", self.theme.fonts.icon);
+                if flat_button(ui, self.theme.buttons.navigation_size, icon, self.theme.accent_gradient(), self.theme.buttons.radius)
+                    .on_hover_text("Оценка выживаемости бункера").clicked()
+                {
+                    self.assessment.open();
+                }
             });
     }
 
@@ -1140,9 +1163,6 @@ impl BunkerApp {
             for p in room.players.iter().filter(|p| p.active) {
                 ui.horizontal(|ui| { self.avatar_widget(ui, p.avatar(), false, 29.0); ui.label(&p.name); });
             }
-            if ui.add(animated_button(self.theme.accent_button("Оценка выживаемости · WIP"))).clicked() {
-                self.show_survivability = true;
-            }
             if ui.add(animated_button(egui::Button::new("В главное меню"))).clicked() { self.leave_room(); }
         });
     }
@@ -1459,16 +1479,6 @@ impl BunkerApp {
             });
             if !open { self.editor = None; }
         }
-        {
-            let active = self.show_survivability;
-            let mut open = active;
-            egui::Window::new("Оценка выживаемости — WIP").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open).fade_in(true).fade_out(true).interactable(active).show(ctx, |ui| {
-                if !active { ui.disable(); }
-                ui.label("Сюжетные финалы и расчёт ресурсов будут добавлены после завершения основных правил.");
-                ui.label("Пока здесь намеренно нет выдуманной оценки.");
-            });
-            self.show_survivability = open;
-        }
     }
 }
 
@@ -1517,7 +1527,14 @@ impl eframe::App for BunkerApp {
                     self.ui_main_menu(ui);
                 }
             });
+        let can_assess = self.can_assess();
+        if can_assess {
+            self.survivability_button(ctx);
+        }
         self.ui_overlays(ctx);
+        if can_assess {
+            self.assessment.show(ctx, &self.theme, self.hero_texture.as_ref().or(self.artwork.catastrophe.as_ref()));
+        }
         self.show_toast(ctx);
         if self.pending.is_some() || self.room_deadline.is_some() || self.upload_pending.is_some() || self.download_pending.is_some() {
             ctx.request_repaint_after(Duration::from_millis(80));
