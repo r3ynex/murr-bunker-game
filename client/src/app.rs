@@ -4,7 +4,7 @@ use crate::artwork::{centered_row, flat_button, input_row, paint_cover, paint_gr
 use crate::network;
 use crate::motion::{animated_button, button_highlight, modal_opacity, screen_opacity};
 use eframe::egui::{self, Color32, RichText, Stroke};
-use ewebsock::{WsEvent, WsMessage, WsSender};
+use crate::network::{WsEvent, WsSender};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Cursor;
@@ -172,6 +172,7 @@ pub struct BunkerApp {
     pending: Option<Receiver<Result<Session, String>>>,
     sender: Option<WsSender>,
     receiver: Option<Receiver<WsEvent>>,
+    room_deadline: Option<Instant>,
     online: bool,
     create_on_connect: bool,
     show_avatar_picker: bool,
@@ -224,7 +225,7 @@ impl BunkerApp {
             avatar: if profile_ready { Some(config.avatar) } else { None },
             avatar_images,
             profile_ready, screen_transition: None, join_code: String::new(),
-            session: None, room: None, pending: None, sender: None, receiver: None, online: false,
+            session: None, room: None, pending: None, sender: None, receiver: None, room_deadline: None, online: false,
             create_on_connect: false,
             show_avatar_picker: false, show_join: false, show_create: false,
             show_settings: false, show_host_tools: false, show_survivability: false,
@@ -323,7 +324,7 @@ impl BunkerApp {
         self.save_config();
     }
     fn start_request(&mut self, join: Option<String>) {
-        if self.pending.is_some() { return; }
+        if self.pending.is_some() || self.room_deadline.is_some() { return; }
         self.sender = None;
         self.receiver = None;
         self.online = false;
@@ -347,6 +348,7 @@ impl BunkerApp {
                 self.session = Some(session);
                 self.sender = Some(sender);
                 self.receiver = Some(receiver);
+                self.room_deadline = Some(Instant::now() + Duration::from_secs(18));
                 self.online = false;
             }
             Err(e) => self.notify(e),
@@ -356,7 +358,7 @@ impl BunkerApp {
         if !self.online {
             self.notify("Нет соединения — переподключись");
         } else if let Some(sender) = &mut self.sender {
-            sender.send(WsMessage::Text(command.to_string().into()));
+            let _ = sender.send(command.to_string());
         }
     }
     fn apply_pack(&mut self) {
@@ -454,7 +456,7 @@ impl BunkerApp {
             match event {
                 WsEvent::Opened => {
                     self.online = true;
-                    self.notify("Соединение установлено");
+
                     if self.create_on_connect {
                         self.create_on_connect = false;
                         self.apply_pack();
@@ -462,17 +464,25 @@ impl BunkerApp {
                     }
                 }
                 WsEvent::Closed => {
-                    if self.online { self.notify("Соединение закрыто"); }
-                    self.online = false;
+                    self.stop_websocket();
+                    self.notify("Соединение закрыто");
                 }
-                WsEvent::Error(e) => { self.online = false; self.notify(format!("Связь: {e}")); }
-                WsEvent::Message(WsMessage::Text(text)) => {
+                WsEvent::Error(e) => {
+                    self.stop_websocket();
+                    self.notify(format!("Связь: {e}"));
+                }
+                WsEvent::Message(text) => {
                     if let Ok(message) = serde_json::from_str::<Value>(&text) {
                         match message.get("type").and_then(Value::as_str) {
                             Some("state") => {
                                 if let Some(data) = message.get("data") {
                                     match serde_json::from_value::<Room>(data.clone()) {
-                                        Ok(room) => self.update_room(room),
+                                        Ok(room) => {
+                                            if self.room_deadline.take().is_some() {
+                                                self.notify("Соединение установлено");
+                                            }
+                                            self.update_room(room);
+                                        },
                                         Err(e) => self.notify(format!("Данные комнаты: {e}")),
                                     }
                                 }
@@ -483,8 +493,11 @@ impl BunkerApp {
                         }
                     }
                 }
-                _ => {}
             }
+        }
+        if self.room_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            self.stop_websocket();
+            self.notify("Сервер не прислал состояние комнаты. Попробуй подключиться снова.");
         }
         self.sync_background(ctx);
     }
@@ -501,10 +514,16 @@ impl BunkerApp {
         }
     }
 
-    fn leave_room(&mut self) {
-        if self.online { self.send(json!({"type":"leave"})); }
+    fn stop_websocket(&mut self) {
+        self.online = false;
+        self.room_deadline = None;
         self.sender = None;
         self.receiver = None;
+    }
+
+    fn leave_room(&mut self) {
+        if self.online { self.send(json!({"type":"leave"})); }
+        self.stop_websocket();
         self.room = None;
         self.clear_background();
         self.session = None;
@@ -1510,7 +1529,7 @@ impl eframe::App for BunkerApp {
             });
         self.ui_overlays(ctx);
         self.show_toast(ctx);
-        if self.pending.is_some() || self.upload_pending.is_some() || self.download_pending.is_some() {
+        if self.pending.is_some() || self.room_deadline.is_some() || self.upload_pending.is_some() || self.download_pending.is_some() {
             ctx.request_repaint_after(Duration::from_millis(80));
         }
     }
