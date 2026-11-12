@@ -20,10 +20,11 @@ pub enum Icon {
     Locked,
     Unlocked,
     Edit,
+    Survivability,
 }
 
 impl Icon {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::Login,
         Self::Join,
         Self::Catastrophe,
@@ -36,6 +37,7 @@ impl Icon {
         Self::Locked,
         Self::Unlocked,
         Self::Edit,
+        Self::Survivability,
     ];
     pub const NAVIGATION: [Self; 6] = [
         Self::Catastrophe,
@@ -60,6 +62,7 @@ impl Icon {
             Self::Locked => "card-locked.png",
             Self::Unlocked => "card-unlocked.png",
             Self::Edit => "card-edit.png",
+            Self::Survivability => "bunker-survivability.png",
         }
     }
 }
