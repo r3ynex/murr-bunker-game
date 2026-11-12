@@ -305,9 +305,6 @@ fn verify_exe(reader: impl Read, size: u64, digest: &str) -> Result<Vec<u8>, Str
 fn install(update: &Update) -> std::io::Result<()> {
     use std::fs::{self, File};
     use std::io::{self, Write};
-    use std::os::windows::process::CommandExt;
-    use std::path::PathBuf;
-    use std::process::Command;
 
     let target = std::env::current_exe()?;
     let directory = target
@@ -322,19 +319,7 @@ fn install(update: &Update) -> std::io::Result<()> {
     file.write_all(&update.bytes)?;
     file.sync_all()?;
     drop(file);
-    let powershell = PathBuf::from(
-        std::env::var_os("SystemRoot")
-            .ok_or_else(|| io::Error::other("Папка Windows не найдена"))?,
-    )
-    .join("System32/WindowsPowerShell/v1.0/powershell.exe");
-    Command::new(powershell)
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            include_str!("install_update.ps1"),
-        ])
+    installer_command()?
         .env("MURR_INSTALL_TARGET", target)
         .env("MURR_INSTALL_DOWNLOAD", staged_exe)
         .env("MURR_INSTALL_PID", std::process::id().to_string())
@@ -343,10 +328,33 @@ fn install(update: &Update) -> std::io::Result<()> {
             "MURR_INSTALL_NEW_HASH",
             format!("{:x}", Sha256::digest(&update.bytes)),
         )
-        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
         .spawn()?;
     let _ = stage.keep();
     Ok(())
+}
+
+#[cfg(windows)]
+fn installer_command() -> std::io::Result<std::process::Command> {
+    use std::os::windows::process::CommandExt;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    let powershell = PathBuf::from(
+        std::env::var_os("SystemRoot")
+            .ok_or_else(|| std::io::Error::other("Папка Windows не найдена"))?,
+    )
+    .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    let mut command = Command::new(powershell);
+    command
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            include_str!("install_update.ps1"),
+        ])
+        .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    Ok(command)
 }
 
 #[cfg(not(windows))]
@@ -389,5 +397,48 @@ mod tests {
         assert_eq!(verify_exe(data.as_slice(), size, &digest).unwrap(), data);
         assert!(verify_exe(data.as_slice(), size + 1, &digest).is_err());
         assert!(verify_exe(b"MZmodified executable".as_slice(), size, &digest).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_installer_replaces_or_restores_the_exe_and_leaves_settings() {
+        use std::fs;
+        use std::path::PathBuf;
+
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        let original = fs::read(system.join("where.exe")).unwrap();
+        let replacement = fs::read(system.join("whoami.exe")).unwrap();
+        let old_hash = format!("{:x}", Sha256::digest(&original));
+        for (bytes, expected) in [
+            (replacement.as_slice(), replacement.as_slice()),
+            (b"MZ invalid executable".as_slice(), original.as_slice()),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let target = directory.path().join("Мурр Бункер.exe");
+            let settings = directory.path().join("theme.json");
+            let stage = directory.path().join("stage");
+            let download = stage.join("download.exe");
+            fs::create_dir(&stage).unwrap();
+            fs::write(&target, &original).unwrap();
+            fs::write(&settings, "{}").unwrap();
+            fs::write(&download, bytes).unwrap();
+            let status = installer_command()
+                .unwrap()
+                .env("PSModulePath", directory.path())
+                .env("MURR_INSTALL_TARGET", &target)
+                .env("MURR_INSTALL_DOWNLOAD", &download)
+                .env("MURR_INSTALL_PID", i32::MAX.to_string())
+                .env("MURR_INSTALL_OLD_HASH", &old_hash)
+                .env(
+                    "MURR_INSTALL_NEW_HASH",
+                    format!("{:x}", Sha256::digest(bytes)),
+                )
+                .status()
+                .unwrap();
+            assert!(status.success());
+            assert_eq!(fs::read(&target).unwrap(), expected);
+            assert_eq!(fs::read_to_string(settings).unwrap(), "{}");
+            assert!(!stage.exists());
+        }
     }
 }

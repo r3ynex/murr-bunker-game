@@ -19,13 +19,24 @@ function Start-Game([string]$flag) {
     $process.Dispose()
 }
 
+function Read-Sha256([string]$path) {
+    $stream = [IO.File]::OpenRead($path)
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try {
+        [BitConverter]::ToString($hash.ComputeHash($stream)).Replace('-', '')
+    } finally {
+        $hash.Dispose()
+        $stream.Dispose()
+    }
+}
+
 try {
-    $parent = Get-Process -Id $parentId -ErrorAction SilentlyContinue
+    $parent = $null
+    try { $parent = [Diagnostics.Process]::GetProcessById($parentId) }
+    catch [ArgumentException] { }
     if ($parent) {
         try {
             if (-not $parent.WaitForExit(20000)) { return }
-        } catch {
-            if (Get-Process -Id $parentId -ErrorAction SilentlyContinue) { throw }
         } finally {
             $parent.Dispose()
         }
@@ -39,10 +50,10 @@ try {
         # Another updater is already handling this executable.
         return
     }
-    if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $env:MURR_INSTALL_OLD_HASH) {
+    if ((Read-Sha256 $target) -ne $env:MURR_INSTALL_OLD_HASH) {
         return
     }
-    if ((Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash -ne $env:MURR_INSTALL_NEW_HASH) {
+    if ((Read-Sha256 $download) -ne $env:MURR_INSTALL_NEW_HASH) {
         throw 'The downloaded executable changed'
     }
 
