@@ -144,6 +144,18 @@ pub fn texture(
     data: &[u8],
     max_size: u32,
 ) -> Option<egui::TextureHandle> {
+    let image = decode_image(data, max_size)?.into_rgba8();
+    Some(ctx.load_texture(
+        name,
+        egui::ColorImage::from_rgba_unmultiplied(
+            [image.width() as usize, image.height() as usize],
+            image.as_raw(),
+        ),
+        egui::TextureOptions::LINEAR,
+    ))
+}
+
+pub(crate) fn decode_image(data: &[u8], max_size: u32) -> Option<image::DynamicImage> {
     let reader = image::ImageReader::new(Cursor::new(data))
         .with_guessed_format()
         .ok()?;
@@ -151,12 +163,7 @@ pub fn texture(
     if width == 0 || height == 0 || width > max_size || height > max_size {
         return None;
     }
-    let image = image::load_from_memory(data).ok()?.to_rgba8();
-    Some(ctx.load_texture(
-        name,
-        egui::ColorImage::from_rgba_unmultiplied([width as usize, height as usize], image.as_raw()),
-        egui::TextureOptions::LINEAR,
-    ))
+    image::load_from_memory(data).ok()
 }
 
 pub fn paint_cover(painter: &egui::Painter, texture: &egui::TextureHandle, rect: Rect) {

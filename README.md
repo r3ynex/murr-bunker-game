@@ -19,7 +19,7 @@
 
 **Manrope:** шрифт включён в Windows-клиент. В `theme.json` можно выбрать встроенные шрифты egui или задать свой TTF. Веб-тестер загружает Manrope через Google Fonts.
 
-**Свои аватарки:** помести `01.png`–`12.png` в папку `avatars` рядом с EXE. Поддерживаются PNG/JPG/WebP. Пошаговая инструкция: **[client/assets/avatars/README.md](client/assets/avatars/README.md)**. В репозитории эти же картинки можно добавить в `client/assets/avatars/` — Windows Actions включит их в релиз.
+**Свои аватарки:** помести файлы с числовыми именами, например `01.png`, `13.jpg` и `50.webp`, в папку `avatars` рядом с EXE и снова открой окно выбора. Подробности в **[инструкции по аватаркам](client/assets/avatars/README.md)**. Файлы из `client/assets/avatars/` автоматически попадают в Windows-сборку.
 
 ## Быстрый старт
 

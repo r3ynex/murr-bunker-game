@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub type AvatarId = u32;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
@@ -43,11 +45,17 @@ pub struct Player {
     #[serde(default)]
     pub ready: bool,
     #[serde(default = "default_avatar")]
-    pub avatar: u8,
+    avatar: AvatarId,
+    #[serde(default, rename = "avatarId")]
+    avatar_id: Option<AvatarId>,
     pub cards: Vec<Card>,
 }
 
 impl Player {
+    pub fn avatar(&self) -> AvatarId {
+        self.avatar_id.unwrap_or(self.avatar)
+    }
+
     pub fn revealed_card(&self, kind: &str) -> Option<&Card> {
         self.cards
             .iter()
@@ -145,7 +153,7 @@ pub struct LocalConfig {
     pub server_url: String,
     pub nickname: String,
     #[serde(default = "default_avatar")]
-    pub avatar: u8,
+    pub avatar: AvatarId,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -156,7 +164,7 @@ pub struct BundleInfo {
     pub background: Option<String>,
 }
 
-fn default_avatar() -> u8 {
+fn default_avatar() -> AvatarId {
     1
 }
 

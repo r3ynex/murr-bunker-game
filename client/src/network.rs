@@ -1,4 +1,4 @@
-use crate::model::Session;
+use crate::model::{AvatarId, Session};
 use serde_json::{json, Value};
 use std::io::{self, Read};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -35,7 +35,7 @@ fn room_agent(timeout: Duration) -> ureq::Agent {
 pub fn request_room(
     base_url: String,
     nickname: String,
-    avatar: u8,
+    avatar: AvatarId,
     code: Option<String>,
 ) -> Receiver<Result<Session, String>> {
     let (tx, rx) = mpsc::channel();

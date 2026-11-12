@@ -1,14 +1,14 @@
-use crate::model::{category_name, Card, LocalConfig, Room, Session};
+use crate::model::{category_name, AvatarId, Card, LocalConfig, Room, Session};
 use crate::appearance::{portable_path, with_icon, FontWeight, Layout, Theme};
 use crate::artwork::{centered_row, flat_button, input_row, paint_cover, paint_gradient, table_cell, Artwork, Icon};
+use crate::avatars::Avatars;
 use crate::network;
 use crate::motion::{animated_button, button_highlight, modal_opacity, screen_opacity};
 use eframe::egui::{self, Color32, RichText, Stroke};
 use crate::network::{WsEvent, WsSender};
 use serde_json::{json, Value};
 use std::fs;
-use std::io::Cursor;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -33,7 +33,7 @@ fn random_int(min: u32, max: u32) -> u32 {
         .map(|d| d.as_nanos()).unwrap_or(34567);
     min + ((nanos ^ (nanos >> 23)) as u32 % (max - min + 1))
 }
-fn avatar_color(id: u8) -> Color32 {
+fn avatar_color(id: AvatarId) -> Color32 {
     let palette = [
         (147, 112, 255), (215, 99, 129), (82, 162, 183), (238, 161, 66),
         (114, 181, 116), (198, 137, 208), (198, 179, 87), (77, 147, 213),
@@ -42,46 +42,9 @@ fn avatar_color(id: u8) -> Color32 {
     let (r,g,b) = palette[(id.saturating_sub(1) as usize) % palette.len()];
     Color32::from_rgb(r,g,b)
 }
-fn avatar_symbol(id: u8) -> &'static str {
+fn avatar_symbol(id: AvatarId) -> &'static str {
     const MARKS: [&str; 12] = ["✦", "◆", "☼", "✿", "★", "♣", "◇", "◈", "✧", "●", "☻", "♟"];
     MARKS[(id.saturating_sub(1) as usize) % MARKS.len()]
-}
-
-fn load_avatar_images(ctx: &egui::Context) -> Vec<Option<egui::TextureHandle>> {
-    (1u8..=12).map(|avatar| {
-        ["png", "jpg", "jpeg", "webp"].iter().find_map(|extension| {
-            let file = format!("{avatar:02}.{extension}");
-            // Portable release: assets next to Murr-Bunker.exe.
-            // Developer builds: sources in client/assets/avatars.
-            let paths = [
-                portable_path(&format!("avatars/{file}")),
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets").join("avatars").join(&file),
-            ];
-            for path in paths {
-                let Ok(data) = fs::read(path) else { continue };
-                if data.len() > 3_000_000 { continue; }
-                // Reject overly large images before allocating the decoded texture.
-                let dimensions = image::ImageReader::new(Cursor::new(&data))
-                    .with_guessed_format().ok()
-                    .and_then(|reader| reader.into_dimensions().ok());
-                let Some((width, height)) = dimensions else { continue };
-                if width == 0 || height == 0 || width > 1024 || height > 1024 {
-                    continue;
-                }
-                let Ok(img) = image::load_from_memory(&data) else { continue };
-                let img = img.to_rgba8();
-                let texture = ctx.load_texture(
-                    format!("avatar-{avatar:02}"),
-                    egui::ColorImage::from_rgba_unmultiplied(
-                        [width as usize, height as usize], img.as_raw()
-                    ),
-                    egui::TextureOptions::LINEAR.with_mipmap_mode(Some(egui::TextureFilter::Linear)),
-                );
-                return Some(texture);
-            }
-            None
-        })
-    }).collect()
 }
 
 fn heading(ui: &mut egui::Ui, theme: &Theme, name: &str) {
@@ -162,8 +125,8 @@ pub struct BunkerApp {
     toast: Option<Toast>,
     server_url: String,
     nickname: String,
-    avatar: Option<u8>,
-    avatar_images: Vec<Option<egui::TextureHandle>>,
+    avatar: Option<AvatarId>,
+    avatars: Avatars,
     profile_ready: bool,
     screen_transition: Option<(Screen, f64)>,
     join_code: String,
@@ -210,7 +173,6 @@ impl BunkerApp {
             "" | "http://127.0.0.1:8787" | "http://localhost:8787") {
             config.server_url = LocalConfig::default().server_url;
         }
-        let avatar_images = load_avatar_images(&cc.egui_ctx);
         let profile_ready = !config.nickname.trim().is_empty();
         Self {
             theme,
@@ -223,7 +185,7 @@ impl BunkerApp {
             server_url: config.server_url,
             nickname: config.nickname,
             avatar: if profile_ready { Some(config.avatar) } else { None },
-            avatar_images,
+            avatars: Avatars::discover(),
             profile_ready, screen_transition: None, join_code: String::new(),
             session: None, room: None, pending: None, sender: None, receiver: None, room_deadline: None, online: false,
             create_on_connect: false,
@@ -245,7 +207,7 @@ impl BunkerApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(layout.window_size.into()));
         }
         self.artwork.reload_icons(ctx);
-        self.avatar_images = load_avatar_images(ctx);
+        self.avatars = Avatars::discover();
         self.theme = theme;
         self.layout = layout;
         let warnings = appearance_warnings([theme_warning, layout_warning, font_warning]);
@@ -319,7 +281,10 @@ impl BunkerApp {
             self.notify("Ник должен содержать от 2 до 24 символов");
             return;
         }
-        if self.avatar.is_none() { self.avatar = Some(random_int(1, 12) as u8); }
+        if self.avatar.is_none() {
+            let ids = self.avatars.ids();
+            self.avatar = Some(ids[random_int(0, (ids.len() - 1) as u32) as usize]);
+        }
         self.profile_ready = true;
         self.save_config();
     }
@@ -530,12 +495,16 @@ impl BunkerApp {
         self.online = false;
         self.notify("Вы вышли в главное меню");
     }
-    fn avatar_widget(&self, ui: &mut egui::Ui, avatar: u8, selected: bool, size: f32) -> egui::Response {
+    fn open_avatar_picker(&mut self) {
+        self.avatars = Avatars::discover();
+        self.show_avatar_picker = true;
+    }
+    fn avatar_widget(&self, ui: &mut egui::Ui, avatar: AvatarId, selected: bool, size: f32) -> egui::Response {
         let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0u8, avatar_color(avatar).gamma_multiply(0.55));
-        if let Some(texture) = self.avatar_images.get(avatar.saturating_sub(1) as usize).and_then(Option::as_ref) {
-            paint_cover(&painter, texture, rect.shrink(2.0));
+        if let Some(texture) = self.avatars.texture(ui.ctx(), avatar) {
+            paint_cover(&painter, &texture, rect.shrink(2.0));
         } else {
             painter.text(
                 rect.center(), egui::Align2::CENTER_CENTER, avatar_symbol(avatar),
@@ -565,7 +534,7 @@ impl BunkerApp {
                 if self.avatar_widget(ui, self.avatar.unwrap_or(1), self.avatar.is_some(), side)
                     .on_hover_text("Выбрать аватар").clicked()
                 {
-                    self.show_avatar_picker = true;
+                    self.open_avatar_picker();
                 }
                 let nickname = input_row(ui, &mut self.nickname, "Выживший #8549", field, side, self.theme.palette.input.color(), FontWeight::SemiBold.font(self.theme.fonts.input));
                 let button = self.artwork.button(Icon::Login, "→", self.theme.fonts.icon);
@@ -590,7 +559,7 @@ impl BunkerApp {
             if self.avatar_widget(ui, self.avatar.unwrap_or(1), false, side)
                 .on_hover_text("Сменить аватар").clicked()
             {
-                self.show_avatar_picker = true;
+                self.open_avatar_picker();
             }
             ui.add(egui::Label::new(FontWeight::Bold.text(self.theme.fonts.profile_name, &self.nickname)).truncate());
         });
@@ -663,7 +632,7 @@ impl BunkerApp {
                                 let color = if ready { self.theme.palette.positive.color() } else { self.theme.palette.negative.color() };
                                 let (bar, _) = ui.allocate_exact_size(egui::vec2(4.0, side), egui::Sense::hover());
                                 ui.painter().rect_filled(bar, 0u8, color);
-                                self.avatar_widget(ui, player.avatar, false, side);
+                                self.avatar_widget(ui, player.avatar(), false, side);
                                 ui.add(egui::Label::new(FontWeight::Bold.text(self.theme.fonts.lobby_name, &player.name)).truncate());
                             });
                         }
@@ -1027,7 +996,7 @@ impl BunkerApp {
                         };
                         table_cell(ui, [player_width, cell[1]], line, fill, |ui| {
                             let avatar_size = (35.0 * scale).min(ui.available_height());
-                            self.avatar_widget(ui, player.avatar, false, avatar_size);
+                            self.avatar_widget(ui, player.avatar(), false, avatar_size);
                             let rect = ui.max_rect();
                             let left = ui.next_widget_position().x;
                             let width = (rect.right() - left).max(1.0);
@@ -1169,7 +1138,7 @@ impl BunkerApp {
         ui.vertical_centered(|ui| {
             ui.label(format!("Осталось участников: {}", room.players.iter().filter(|p| p.active).count()));
             for p in room.players.iter().filter(|p| p.active) {
-                ui.horizontal(|ui| { self.avatar_widget(ui, p.avatar, false, 29.0); ui.label(&p.name); });
+                ui.horizontal(|ui| { self.avatar_widget(ui, p.avatar(), false, 29.0); ui.label(&p.name); });
             }
             if ui.add(animated_button(self.theme.accent_button("Оценка выживаемости · WIP"))).clicked() {
                 self.show_survivability = true;
@@ -1309,17 +1278,32 @@ impl BunkerApp {
                         ui.set_width(grid_width);
                         ui.vertical_centered(|ui| { ui.label(FontWeight::Regular.text(self.theme.fonts.avatar_caption, "Выберите аватар:")); });
                         ui.add_space(8.0);
-                        for row in (1u8..=12).collect::<Vec<_>>().chunks(usize::from(columns)) {
-                            let width = side * row.len() as f32 + gap * (row.len() - 1) as f32;
-                            centered_row(ui, width, side, |ui| {
-                                for &id in row {
-                                    if self.avatar_widget(ui, id, self.avatar == Some(id), side).clicked() {
-                                        self.avatar = Some(id);
-                                        self.show_avatar_picker = false;
-                                        if self.profile_ready { self.save_config(); }
-                                    }
+                        let columns = usize::from(columns);
+                        let ids = self.avatars.ids();
+                        let mut picked = None;
+                        egui::ScrollArea::vertical()
+                            .id_salt("avatar-grid")
+                            .max_height((ctx.content_rect().height() * 0.70).min(420.0))
+                            .auto_shrink([false, true])
+                            .show_rows(ui, side, ids.len().div_ceil(columns), |ui, rows| {
+                                for row in rows {
+                                    let avatars = &ids[row * columns..((row + 1) * columns).min(ids.len())];
+                                    let width = side * avatars.len() as f32 + gap * (avatars.len() - 1) as f32;
+                                    centered_row(ui, width, side, |ui| {
+                                        for &id in avatars {
+                                            if self.avatar_widget(ui, id, self.avatar == Some(id), side)
+                                                .on_hover_text(format!("Аватар {id}")).clicked()
+                                            {
+                                                picked = Some(id);
+                                            }
+                                        }
+                                    });
                                 }
                             });
+                        if let Some(id) = picked {
+                            self.avatar = Some(id);
+                            self.show_avatar_picker = false;
+                            if self.profile_ready { self.save_config(); }
                         }
                     });
                 if active && modal.should_close() { self.show_avatar_picker = false; }

@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { DEFAULT_PACK, normalizePack, drawCard, drawScenario } from "./content.js";
 import { readBundle, sha256Hex, MAX_ZIP_BYTES } from "./bundle.js";
+import { avatarFrom, publicAvatar } from "./avatars.js";
 import { unzipSync } from "fflate";
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), {
@@ -9,7 +10,6 @@ const json = (data, status = 200) => new Response(JSON.stringify(data), {
 const codeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const randomCode = () => Array.from(crypto.getRandomValues(new Uint8Array(8)), b => codeAlphabet[b % codeAlphabet.length]).join("");
 const randomToken = () => crypto.randomUUID() + crypto.randomUUID();
-const avatarFrom = value => Number.isInteger(value) && value >= 1 && value <= 12 ? value : 1;
 const nameFrom = body => {
   const name = body?.name;
   if (typeof name !== "string" || name.trim().length < 2 || name.trim().length > 24) throw Error("Ник: от 2 до 24 символов");
@@ -184,7 +184,7 @@ export class Room extends DurableObject {
       ballotsCount: Object.keys(state.ballots).length, voteResults: state.voteResults,
       log: state.log, connected: this.ctx.getWebSockets().length,
       players: state.players.map(p => ({
-        id: p.id, name: p.name, avatar: p.avatar || 1,
+        id: p.id, name: p.name, ...publicAvatar(p.avatar),
         ready: p.ready ?? (p.id === state.hostId), active: p.active,
         cards: p.cards.filter(c => p.id === viewerId || c.revealed)
           .map(c => ({ kind: c.kind, value: c.value, revealed: c.revealed, description: c.description }))

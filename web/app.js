@@ -162,7 +162,7 @@ function render() {
     addText(panel, "Для тестовой партии достаточно двух человек.", "p", "muted");
     const list = element("div", null, "list");
     for (const player of room.players) {
-      addText(list, `${player.id === room.hostId ? "♛" : "•"} ${player.name} · Аватар ${player.avatar || 1} · ${player.id === room.hostId || player.ready ? "Готов" : "Не готов"}`, "div");
+      addText(list, `${player.id === room.hostId ? "♛" : "•"} ${player.name} · Аватар ${player.avatarId ?? player.avatar ?? 1} · ${player.id === room.hostId || player.ready ? "Готов" : "Не готов"}`, "div");
     }
     panel.append(list);
     if (isHost) {
