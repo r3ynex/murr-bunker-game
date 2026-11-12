@@ -8,6 +8,7 @@ mod model;
 mod motion;
 mod network;
 mod packs;
+mod updater;
 
 fn main() -> eframe::Result {
     let (layout, layout_warning) = appearance::Layout::load();
