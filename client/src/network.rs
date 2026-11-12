@@ -4,8 +4,32 @@ use std::ops::ControlFlow;
 use serde_json::{json, Value};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::io::Read;
+use std::io::{self, Read};
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::Duration;
+
+const WORKER_HOST: &str = "murr-bunker-api.r3ynex-error.workers.dev";
+
+fn prefer_worker_ipv4(netloc: &str, addresses: &mut [SocketAddr]) {
+    // Some Windows networks advertise IPv6 but time out when using it for this Worker.
+    if netloc.rsplit_once(':').is_some_and(|(host, _)| host.eq_ignore_ascii_case(WORKER_HOST)) {
+        addresses.sort_by_key(SocketAddr::is_ipv6);
+    }
+}
+
+fn resolve_room_host(netloc: &str) -> io::Result<Vec<SocketAddr>> {
+    let mut addresses: Vec<_> = netloc.to_socket_addrs()?.collect();
+    prefer_worker_ipv4(netloc, &mut addresses);
+    Ok(addresses)
+}
+
+fn room_agent(timeout: Duration) -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .resolver(resolve_room_host)
+        .timeout_connect(Duration::from_secs(8))
+        .timeout(timeout)
+        .build()
+}
 
 pub fn request_room(base_url: String, nickname: String, avatar: u8, code: Option<String>) -> Receiver<Result<Session, String>> {
     let (tx, rx) = mpsc::channel();
@@ -19,9 +43,7 @@ pub fn request_room(base_url: String, nickname: String, avatar: u8, code: Option
             Some(code) => format!("{base}/api/rooms/{code}/join"),
             None => format!("{base}/api/rooms"),
         };
-        let agent = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(12))
-            .build();
+        let agent = room_agent(Duration::from_secs(20));
         let response = agent.post(&url).send_json(json!({ "name": nickname, "avatar": avatar }));
         let result: Result<Session, String> = match response {
             Ok(resp) => resp.into_json::<Session>().map_err(|err| err.to_string()),
@@ -72,7 +94,7 @@ pub fn upload_bundle(base_url: String, session: Session, bytes: Vec<u8>) -> Rece
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let url = format!("{}/api/rooms/{}/bundle", base_url.trim().trim_end_matches('/'), session.code);
-        let response = ureq::AgentBuilder::new().timeout(Duration::from_secs(25)).build()
+        let response = room_agent(Duration::from_secs(25))
             .post(&url)
             .set("authorization", &format!("Bearer {}", session.token))
             .set("content-type", "application/zip")
@@ -98,7 +120,7 @@ pub fn download_background(base_url: String, session: Session) -> Receiver<Resul
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let url = format!("{}/api/rooms/{}/background", base_url.trim().trim_end_matches('/'), session.code);
-        let response = ureq::AgentBuilder::new().timeout(Duration::from_secs(25)).build()
+        let response = room_agent(Duration::from_secs(25))
             .get(&url)
             .set("authorization", &format!("Bearer {}", session.token))
             .call();
@@ -127,6 +149,20 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::time::Instant;
+
+    #[test]
+    fn worker_prefers_ipv4_but_keeps_ipv6_and_custom_host_order() {
+        let ipv6: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+        let ipv4: SocketAddr = "192.0.2.1:443".parse().unwrap();
+        let mut addresses = [ipv6, ipv4];
+        prefer_worker_ipv4("custom.example:443", &mut addresses);
+        assert_eq!(addresses, [ipv6, ipv4]);
+        prefer_worker_ipv4(&format!("{WORKER_HOST}:443"), &mut addresses);
+        assert_eq!(addresses, [ipv4, ipv6]);
+        let mut ipv6_only = [ipv6];
+        prefer_worker_ipv4(&format!("{WORKER_HOST}:443"), &mut ipv6_only);
+        assert_eq!(ipv6_only, [ipv6]);
+    }
 
     #[test]
     fn https_room_connection_starts_a_tls_handshake() {

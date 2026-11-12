@@ -7,9 +7,10 @@ use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
 pub const BASE: &str = include_str!("../../packs/bunker-6.json");
-const BUILTIN: [(&str, &str); 3] = [
+const BUILTIN: [(&str, &str); 4] = [
     ("bunker-6", BASE),
     ("bunker-4", include_str!("../../packs/bunker-4.json")),
+    ("bunker-5", include_str!("../../packs/bunker-5.json")),
     (
         "bunker-space",
         include_str!("../../packs/bunker-space.json"),
