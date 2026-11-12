@@ -47,7 +47,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item client/target/release/murr-bunker-game.exe dist/Murr-Bunker.exe
-          Copy-Item packs/bunker-6.json dist/pack-example.json
+          Copy-Item packs/therudygames-bunker-6.json dist/pack-example.json
           Copy-Item packs dist/packs -Recurse
           Copy-Item client/theme.json, client/layout.json, client/APPEARANCE.md -Destination dist
           Copy-Item client/assets/icons dist/icons -Recurse

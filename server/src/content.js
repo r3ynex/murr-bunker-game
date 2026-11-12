@@ -1,6 +1,6 @@
 // Murr Pack v2: compact, data-only bundles produced from editable pack folders.
 // No user content is evaluated as code. Legacy v1 and Bunker Online exports remain importable.
-import basePack from "../../packs/bunker-6.json" with { type: "json" };
+import basePack from "../../packs/therudygames-bunker-6.json" with { type: "json" };
 
 export const CATEGORIES = [
   "gender", "body", "personality", "profession", "health", "hobby",

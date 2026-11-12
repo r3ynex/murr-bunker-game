@@ -14,7 +14,7 @@ const starter = fileURLToPath(new URL("../../packs/starter.json", import.meta.ur
 const example = JSON.parse(readFileSync(starter, "utf8"));
 
 test("Бункер 6 is the base pack with all eleven categories", () => {
-  assert.equal(DEFAULT_PACK.name, "Бункер 6");
+  assert.equal(DEFAULT_PACK.name, "[TheRudyGames] Бункер 6");
   assert.equal(DEFAULT_PACK.categoryOrder.reduce((total, kind) => total + DEFAULT_PACK.categories[kind].length, 0), 112);
   assert.equal(CATEGORIES.length, 11);
   for (const kind of CATEGORIES) assert.ok(DEFAULT_PACK.categories[kind].length >= 3, kind);
