@@ -1,9 +1,10 @@
 import { DurableObject } from "cloudflare:workers";
-import { DEFAULT_PACK, normalizePack, drawCard, drawScenario } from "./content.js";
+import { DEFAULT_PACK, normalizePack, drawCard } from "./content.js";
 import { readBundle, sha256Hex, MAX_ZIP_BYTES } from "./bundle.js";
 import { avatarFrom, publicAvatar } from "./avatars.js";
-import { addInventoryItem, inventoryItems, isInventory, replaceInventory, transferInventory } from "./inventory.js";
+import { addInventoryItem, inventoryItems, isInventory, removeInventoryItems, replaceInventory, transferInventory } from "./inventory.js";
 import { healthDegree, setHealthDegree, swapCards } from "./cards.js";
+import { applyHostAction, buildUndo, bunkerSections, hostSnapshot, startGame, undoHostAction } from "./host.js";
 import { unzipSync } from "fflate";
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), {
@@ -146,7 +147,7 @@ export class Room extends DurableObject {
         // SQLite-backed DO KV supports the bounded Uint8Array directly.
         await this.ctx.storage.put("bundle-data", input);
         state.pack = bundle.pack;
-        state.bundle = { sha256: hash, bytes: input.length, background: bundle.background };
+        state.bundle = { sha256: hash, bytes: input.length, background: bundle.background, defaultBackground: bundle.background };
         for (const p of state.players) p.ready = p.id === state.hostId;
         this.note(state, "Выбран ZIP-пак: " + state.pack.name);
         await this.ctx.storage.put("room", state);
@@ -184,6 +185,12 @@ export class Room extends DurableObject {
       eventChance: state.eventChance ?? 0,
       canSwapCards: true,
       canSetHealthDegree: true,
+      speechEndsAt: state.speechEndsAt ?? 0,
+      hostControls: viewerId === state.hostId ? {
+        undo: Boolean(state.hasHostUndo),
+        catastrophes: state.pack.catastrophes?.map(entry => entry.title) ?? [],
+        bunkerSections: bunkerSections(state),
+      } : undefined,
       categoryLabels: { ...state.pack.categoryLabels, ability2: "Спец. возможность 2" }, voteOpen: state.voteOpen,
       ballotsCount: Object.keys(state.ballots).length, voteResults: state.voteResults,
       log: state.log, connected: this.ctx.getWebSockets().length,
@@ -218,9 +225,19 @@ export class Room extends DurableObject {
       const data = JSON.parse(message);
       if (!data || typeof data !== "object") throw Error("Некорректная команда");
       const host = me.id === state.hostId;
-      const hostOnly = ["start", "start_vote", "finish_vote", "next_round", "set_active", "set_seats", "set_pack", "finish", "set_event_chance", "host_edit_card", "host_redraw_card", "host_reveal_card", "host_add_item", "host_transfer_items", "host_swap_cards", "host_set_health_degree"];
+      const hostOnly = ["start", "start_vote", "finish_vote", "next_round", "set_active", "set_seats", "set_pack", "finish", "set_event_chance", "host_edit_card", "host_redraw_card", "host_reveal_card", "host_add_item", "host_transfer_items", "host_swap_cards", "host_set_health_degree", "host_remove_items", "host_action", "host_undo"];
       if (hostOnly.includes(data.type) && !host) throw Error("Только ведущий может выполнить действие");
-      if (data.type === "set_pack") {
+      if (state.stage === "closed" && data.type !== "leave") throw Error("Комната закрыта");
+      const recordUndo = ["playing", "finished"].includes(state.stage) && hostOnly.includes(data.type)
+        && data.type !== "host_undo" && !["close", "transfer_host", "restart"].includes(data.action);
+      const before = recordUndo ? hostSnapshot(state) : null;
+      if (data.type === "host_action") {
+        this.note(state, applyHostAction(state, data));
+      } else if (data.type === "host_undo") {
+        if (!state.hasHostUndo) throw Error("Нет действия для отмены");
+        undoHostAction(state, await this.ctx.storage.get("host-undo"));
+        this.note(state, "Ведущий отменил предыдущее действие");
+      } else if (data.type === "set_pack") {
         if (state.stage !== "lobby") throw Error("Менять пак можно только до старта");
         state.pack = normalizePack(data.pack);
         state.bundle = null;
@@ -245,26 +262,7 @@ export class Room extends DurableObject {
         if (state.stage !== "lobby") throw Error("Игра уже запущена");
         if (state.players.length < 2) throw Error("Нужно минимум два игрока (тестовый режим)");
         if (state.players.some(p => p.id !== state.hostId && !p.ready)) throw Error("Все игроки должны нажать «Готов»");
-        // Rooms created before v2 may still contain an old-style stored pack.
-        if (!Array.isArray(state.pack.categoryOrder)) state.pack = normalizePack(state.pack);
-        state.stage = "playing";
-        state.round = 1;
-        const scenario = drawScenario(state.pack);
-        state.catastrophe = scenario.catastrophe;
-        if (state.bundle && scenario.background !== undefined) {
-          state.bundle.background = scenario.background;
-        }
-        state.bunker = scenario.bunker;
-        state.players.forEach(p => {
-          p.active = true;
-          p.cards = state.pack.categoryOrder.map(kind => drawCard(state.pack, kind));
-          for (const card of p.cards) {
-            if (isInventory(card.kind)) replaceInventory(state, card, card.value, card.description);
-          }
-          if (state.pack.categories.ability?.length > 1) {
-            p.cards.push({ ...drawCard(state.pack, "ability"), kind: "ability2" });
-          }
-        });
+        startGame(state);
         this.note(state, "Игра началась");
       } else if (data.type === "reveal") {
         if (state.stage !== "playing" || !me.active) throw Error("Сейчас нельзя открывать карты");
@@ -281,7 +279,7 @@ export class Room extends DurableObject {
         if (state.stage !== "playing") throw Error("Передача доступна во время игры");
         transferInventory(state, data);
         this.note(state, "Ведущий перенёс предметы между игроками");
-      } else if (["host_edit_card", "host_redraw_card", "host_reveal_card", "host_add_item", "host_set_health_degree"].includes(data.type)) {
+      } else if (["host_edit_card", "host_redraw_card", "host_reveal_card", "host_add_item", "host_remove_items", "host_set_health_degree"].includes(data.type)) {
         if (state.stage !== "playing") throw Error("Игра ещё не началась");
         const player = state.players.find(p => p.id === data.playerId);
         const kind = data.type === "host_set_health_degree" ? "health" : data.kind;
@@ -289,6 +287,8 @@ export class Room extends DurableObject {
         if (!card) throw Error("Карта игрока не найдена");
         if (data.type === "host_set_health_degree") {
           setHealthDegree(card, data.degree, state.pack.categories?.health);
+        } else if (data.type === "host_remove_items") {
+          removeInventoryItems(card, data.itemIds);
         } else if (data.type === "host_add_item") {
           if (!isInventory(card.kind)) throw Error("Добавлять предметы можно только в инвентарь или рюкзак");
           addInventoryItem(state, card, data.value);
@@ -301,7 +301,7 @@ export class Room extends DurableObject {
           } else {
             card.value = data.value.trim();
             card.description = "";
-            if (card.kind === "health") delete card.health;
+            if (card.kind === "health" || card.kind === "profession") delete card[card.kind];
           }
         } else if (data.type === "host_reveal_card") {
           card.revealed = true;
@@ -314,7 +314,7 @@ export class Room extends DurableObject {
           } else {
             card.value = fresh.value;
             card.description = fresh.description;
-            if (card.kind === "health") card.health = fresh.health;
+            if (card.kind === "health" || card.kind === "profession") card[card.kind] = fresh[card.kind];
           }
           // Preserve visibility; never secretly hide a card that was already revealed.
         }
@@ -375,7 +375,17 @@ export class Room extends DurableObject {
       } else {
         throw Error("Неизвестная команда");
       }
-      await this.ctx.storage.put("room", state);
+      let undo = before && buildUndo(before, state);
+      const resetUndo = data.type === "host_undo" || (data.type === "host_action"
+        && ["close", "transfer_host", "restart"].includes(data.action));
+      const saveUndo = Boolean(undo) || resetUndo;
+      if (undo && new TextEncoder().encode(JSON.stringify(undo)).length > 1_500_000) undo = null;
+      if (saveUndo) {
+        state.hasHostUndo = Boolean(undo);
+        await this.ctx.storage.put({ room: state, "host-undo": undo || null });
+      } else {
+        await this.ctx.storage.put("room", state);
+      }
       await this.broadcast(state);
     } catch (error) {
       ws.send(JSON.stringify({ type: "error", message: String(error.message || error).slice(0, 200) }));

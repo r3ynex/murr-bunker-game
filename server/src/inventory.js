@@ -54,19 +54,29 @@ export function transferInventory(state, { playerId, targetId, kind, itemIds }) 
   const source = state.players.find(player => player.id === playerId)?.cards.find(card => card.kind === kind);
   const target = state.players.find(player => player.id === targetId)?.cards.find(card => card.kind === kind);
   if (!source?.revealed || !target) throw Error("Открой карточку с предметами перед переносом");
+  const { kept, selected } = selectInventoryItems(source, itemIds);
+  const received = [...inventoryItems(target), ...selected];
+  checkCapacity(received);
+
+  setItems(source, kept);
+  setItems(target, received.map(item => assignLegacyId(state, item)));
+}
+
+export function removeInventoryItems(card, itemIds) {
+  if (!isInventory(card.kind) || !card.revealed) throw Error("Открой рюкзак или инвентарь перед удалением");
+  const { kept } = selectInventoryItems(card, itemIds);
+  setItems(card, kept);
+}
+
+function selectInventoryItems(card, itemIds) {
   if (typeof itemIds !== "string" || itemIds.length > 600) throw Error("Укажи ID через запятую");
   const ids = itemIds.split(",").map(id => id.trim());
   const unique = new Set(ids);
   if (ids.length > MAX_ITEMS || unique.size !== ids.length || ids.some(id => !/^\d{1,16}$/.test(id))) {
     throw Error("Укажи уникальные ID через запятую");
   }
-  const items = inventoryItems(source);
-  const moved = items.filter(item => unique.has(item.id));
-  if (moved.length !== ids.length) throw Error("Список предметов изменился. Проверь ID");
-  const destination = inventoryItems(target);
-  const received = [...destination, ...moved];
-  checkCapacity(received);
-
-  setItems(source, items.filter(item => !unique.has(item.id)));
-  setItems(target, received.map(item => assignLegacyId(state, item)));
+  const items = inventoryItems(card);
+  const selected = items.filter(item => unique.has(item.id));
+  if (selected.length !== ids.length) throw Error("Список предметов изменился. Проверь ID");
+  return { kept: items.filter(item => !unique.has(item.id)), selected };
 }

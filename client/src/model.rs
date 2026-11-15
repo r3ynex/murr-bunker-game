@@ -32,6 +32,10 @@ pub struct Room {
     #[serde(default)]
     pub can_set_health_degree: bool,
     #[serde(default)]
+    pub speech_ends_at: u64,
+    #[serde(default)]
+    pub host_controls: Option<HostControls>,
+    #[serde(default)]
     pub category_labels: HashMap<String, String>,
     pub vote_open: bool,
     pub ballots_count: usize,
@@ -39,6 +43,14 @@ pub struct Room {
     pub log: Vec<String>,
     pub connected: usize,
     pub players: Vec<Player>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostControls {
+    pub undo: bool,
+    pub catastrophes: Vec<String>,
+    pub bunker_sections: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -318,14 +318,27 @@ export function drawCard(pack, kind) {
   const title = cardHeading(entry.title, entry.stage);
   return { kind, value: [title, ...details, entry.description].filter(Boolean).join("\n"),
     revealed: false, description: entry.description ?? "",
-    ...(kind === "health" && { health: { title: entry.title, degree: entry.stage ?? "" } }) };
+    ...(["health", "profession"].includes(kind) && { [kind]: { title: entry.title, degree: entry.stage ?? "" } }) };
 }
+export function drawCatastrophe(pack, index) {
+  const selected = index === undefined ? pickEntry(pack.catastrophes) : pack.catastrophes[index];
+  if (!selected) throw Error("Катаклизм не найден в активном паке");
+  return { catastrophe: formatted(selected), background: selected.image };
+}
+
+export function drawBunkerSection(pack, key) {
+  const entries = pack.bunker[key];
+  if (!entries?.length) throw Error("В активном паке нет этой секции бункера");
+  return formatted(pickEntry(entries));
+}
+
+export function formatBunker(sections) {
+  return Object.entries(BUNKER_LABELS).filter(([key]) => sections[key])
+    .map(([key, label]) => label + ": " + sections[key]).join("\n");
+}
+
 export function drawScenario(pack) {
-  const selected = pickEntry(pack.catastrophes);
-  const catastrophe = formatted(selected);
-  const lines = [];
-  for (const [key, label] of Object.entries(BUNKER_LABELS)) {
-    if (pack.bunker[key]?.length) lines.push(label + ": " + formatted(pickEntry(pack.bunker[key])));
-  }
-  return { catastrophe, bunker: lines.join("\n"), background: selected.image };
+  const bunkerSections = Object.fromEntries(Object.keys(BUNKER_LABELS)
+    .filter(key => pack.bunker[key]?.length).map(key => [key, drawBunkerSection(pack, key)]));
+  return { ...drawCatastrophe(pack), bunker: formatBunker(bunkerSections), bunkerSections };
 }

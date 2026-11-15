@@ -16,9 +16,9 @@ export function cardHeading(title, degree) {
   return degree ? title + " (" + degree + ")" : title;
 }
 
-function healthParts(card, entries) {
-  if (card.health) {
-    const { title, degree } = card.health;
+function stagedCardParts(card, entries) {
+  if (card[card.kind]) {
+    const { title, degree } = card[card.kind];
     return { title, degree, tail: card.value.slice(cardHeading(title, degree).length) };
   }
 
@@ -34,7 +34,7 @@ function healthParts(card, entries) {
   const newline = card.value.indexOf("\n");
   const title = newline < 0 ? card.value : card.value.slice(0, newline);
   const tail = newline < 0 ? "" : card.value.slice(newline);
-  const labeled = /^\n(?:Уровень\/примечание|Степень): ([^\n]+)(?=\n|$)/.exec(tail);
+  const labeled = /^\n(?:Уровень\/примечание|Степень|Стаж): ([^\n]+)(?=\n|$)/.exec(tail);
   if (labeled && !card.description?.startsWith(labeled[0].slice(1))) {
     return { title, degree: labeled[1].trim(), tail: tail.slice(labeled[0].length) };
   }
@@ -42,16 +42,21 @@ function healthParts(card, entries) {
 }
 
 export function healthDegree(card, entries = []) {
-  return healthParts(card, entries).degree;
+  return stagedCardParts(card, entries).degree;
 }
 
 export function setHealthDegree(card, degree, entries = []) {
   if (card.kind !== "health") throw Error("Степень можно изменить только у карты здоровья");
+  setCardStage(card, degree, entries);
+}
+
+export function setCardStage(card, degree, entries = []) {
+  if (card.kind !== "health" && card.kind !== "profession") throw Error("У карты нет степени или стажа");
   if (typeof degree !== "string" || degree.trim().length > 160 || /[\r\n]/.test(degree)) {
-    throw Error("Степень здоровья должна помещаться в одну строку до 160 символов");
+    throw Error("Степень или стаж должны помещаться в одну строку до 160 символов");
   }
-  const { title, tail } = healthParts(card, entries);
+  const { title, tail } = stagedCardParts(card, entries);
   const trimmed = degree.trim();
-  card.health = { title, degree: trimmed };
+  card[card.kind] = { title, degree: trimmed };
   card.value = cardHeading(title, trimmed) + tail;
 }

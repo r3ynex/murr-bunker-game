@@ -142,6 +142,14 @@ function updateConnection() {
   $("connection").textContent = connected ? "● Онлайн" : "○ Нет подключения";
   $("connection").classList.toggle("online", connected);
 }
+function renderSpeechTimer() {
+  const timer = $("speechTimer");
+  timer.hidden = room?.stage !== "playing" || !room.speechEndsAt;
+  if (timer.hidden) return;
+  const seconds = Math.max(0, Math.ceil((room.speechEndsAt - Date.now()) / 1000));
+  timer.textContent = seconds ? `Обсуждение · ${seconds} сек.` : "Время вышло";
+}
+setInterval(renderSpeechTimer, 1000);
 function render() {
   if (!room) return;
   const isHost = room.you === room.hostId;
@@ -150,6 +158,7 @@ function render() {
   $("room").hidden = false;
   $("roomCode").textContent = room.code;
   $("roomMeta").textContent = `Раунд: ${room.round} · Мест: ${room.seats} · Пак: ${room.packName} · Подключений: ${room.connected}`;
+  renderSpeechTimer();
   const mount = $("roomUI");
   const previouslyOpen = new Set(Array.from(mount.querySelectorAll("details[data-player]"))
     .filter(item => item.open).map(item => item.dataset.player));
@@ -237,9 +246,9 @@ function render() {
     }
     return;
   }
-  if (room.stage === "finished") {
+  if (["finished", "closed"].includes(room.stage)) {
     const panel = element("section", null, "panel");
-    addText(panel, "Партия завершена", "h2");
+    addText(panel, room.stage === "closed" ? "Комната закрыта ведущим" : "Партия завершена", "h2");
     addText(panel, "Оставшиеся участники:");
     for (const player of room.players.filter(p => p.active)) addText(panel, "• " + player.name);
     mount.append(panel);
