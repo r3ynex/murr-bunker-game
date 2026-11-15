@@ -6,7 +6,10 @@ use std::io::Read;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const VERSION: &str = match option_env!("MURR_BUILD_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
 const DEFAULT_REPO: &str = "r3ynex/murr-bunker-game";
 const ASSET_NAME: &str = "Murr-Bunker.exe";
 const MAX_EXE_BYTES: u64 = 64 * 1024 * 1024;
@@ -180,10 +183,7 @@ fn asset_for_release<'a>(
 fn api_request(agent: &ureq::Agent, url: &str, accept: &str, token: Option<&str>) -> ureq::Request {
     let request = agent
         .get(url)
-        .set(
-            "User-Agent",
-            concat!("Murr-Bunker/", env!("CARGO_PKG_VERSION")),
-        )
+        .set("User-Agent", &format!("Murr-Bunker/{VERSION}"))
         .set("Accept", accept)
         .set("X-GitHub-Api-Version", "2022-11-28");
     match token {
@@ -230,7 +230,7 @@ fn download_latest() -> Result<Option<Update>, String> {
     }
     let release: Release =
         serde_json::from_slice(&json).map_err(|_| "Неверные данные релиза GitHub")?;
-    let installed = Version::parse(VERSION).expect("Cargo package version");
+    let installed = Version::parse(VERSION).map_err(|_| "Некорректная версия сборки")?;
     let Some((version, asset)) = asset_for_release(&release, &installed)? else {
         return Ok(None);
     };
