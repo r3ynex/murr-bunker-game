@@ -174,6 +174,13 @@ pub fn paint_cover(painter: &egui::Painter, texture: &egui::TextureHandle, rect:
     painter.image(texture.id(), rect, uv, Color32::WHITE);
 }
 
+pub fn paint_contain(painter: &egui::Painter, texture: &egui::TextureHandle, rect: Rect) {
+    let source = texture.size_vec2();
+    let scale = (rect.width() / source.x).min(rect.height() / source.y);
+    let fitted = Rect::from_center_size(rect.center(), source * scale);
+    painter.image(texture.id(), fitted, UV, Color32::WHITE);
+}
+
 pub fn paint_gradient(rect: Rect, first: Color32, last: Color32, vertical: bool) -> egui::Shape {
     let (top_right, bottom_left) = if vertical {
         (first, last)
