@@ -22,6 +22,10 @@ permissions:
 jobs:
   portable-windows:
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.release-version.outputs.version }}
+    env:
+      MURR_RELEASE_REPO: ${{ vars.MURR_RELEASE_REPO || github.repository }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,6 +37,20 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: client
+
+      - name: Set Windows release version
+        id: release-version
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        shell: pwsh
+        run: |
+          $manifest = cargo metadata --no-deps --format-version 1 --manifest-path client/Cargo.toml | ConvertFrom-Json
+          $packageVersion = ($manifest.packages | Where-Object { $_.name -eq 'murr-bunker-game' }).version
+          if ($packageVersion -notmatch '^(\d+)\.(\d+)\.\d+$') {
+            throw 'The Cargo version must have the form major.minor.patch'
+          }
+          $version = "$($Matches[1]).$($Matches[2]).$env:GITHUB_RUN_NUMBER"
+          "MURR_BUILD_VERSION=$version" >> $env:GITHUB_ENV
+          "version=$version" >> $env:GITHUB_OUTPUT
 
       - name: Test client
         working-directory: client
@@ -67,3 +85,57 @@ jobs:
           name: Murr-Bunker-Windows-x64
           path: Murr-Bunker-Windows-x64.zip
           if-no-files-found: error
+
+  publish-release:
+    if: needs.portable-windows.outputs.version != ''
+    needs: portable-windows
+    runs-on: windows-latest
+    concurrency:
+      group: portable-windows-release
+      queue: max
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Murr-Bunker-Windows-x64
+
+      - name: Publish Windows release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MURR_RELEASE_REPO: ${{ vars.MURR_RELEASE_REPO || github.repository }}
+          MURR_RELEASE_TOKEN: ${{ secrets.MURR_RELEASE_TOKEN }}
+          MURR_BUILD_VERSION: ${{ needs.portable-windows.outputs.version }}
+        run: |
+          $zip = 'Murr-Bunker-Windows-x64.zip'
+          Expand-Archive -LiteralPath $zip -DestinationPath release
+          $tag = "v$env:MURR_BUILD_VERSION"
+          $repo = $env:MURR_RELEASE_REPO
+          $argsForTag = @('--target', $env:GITHUB_SHA)
+          if ($repo -ne $env:GITHUB_REPOSITORY) {
+            if (-not $env:MURR_RELEASE_TOKEN) { throw 'Set MURR_RELEASE_TOKEN for the distribution repository' }
+            $env:GH_TOKEN = $env:MURR_RELEASE_TOKEN
+            $argsForTag = @()
+          }
+          $existing = gh release view $tag --repo $repo --json isDraft 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            if (-not ($existing | ConvertFrom-Json).isDraft) {
+              Write-Output "Release $tag is already published"
+              exit 0
+            }
+            gh release upload $tag $zip release/Murr-Bunker.exe --repo $repo --clobber
+          } else {
+            $notes = "Windows x64 · $env:GITHUB_SHA · $env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            gh release create $tag $zip release/Murr-Bunker.exe --repo $repo --draft --title "Murr Bunker $tag" --notes $notes @argsForTag
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $releases = gh release list --repo $repo --exclude-drafts --exclude-pre-releases --limit 100 --json tagName,isLatest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $latestTag = ($releases | ConvertFrom-Json | Where-Object isLatest).tagName
+          $markLatest = '--latest'
+          if ($latestTag -match '^v(\d+\.\d+\.\d+)$' -and [version]$Matches[1] -gt [version]$env:MURR_BUILD_VERSION) {
+            $markLatest = '--latest=false'
+          }
+          gh release edit $tag --repo $repo --draft=false $markLatest

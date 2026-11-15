@@ -6,6 +6,7 @@ use crate::network;
 use crate::motion::{animated_button, button_highlight, modal_opacity, screen_opacity};
 use eframe::egui::{self, Color32, RichText, Stroke};
 use crate::network::{WsEvent, WsSender};
+use crate::updater::{Updater, VERSION};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
@@ -123,6 +124,7 @@ pub struct BunkerApp {
     artwork: Artwork,
     layout: Layout,
     toast: Option<Toast>,
+    updater: Updater,
     server_url: String,
     nickname: String,
     avatar: Option<AvatarId>,
@@ -184,6 +186,7 @@ impl BunkerApp {
                 text: appearance_message,
                 started: Instant::now(),
             }),
+            updater: Updater::new(),
             server_url: config.server_url,
             nickname: config.nickname,
             avatar: if profile_ready { Some(config.avatar) } else { None },
@@ -1443,6 +1446,12 @@ impl BunkerApp {
                         self.reload_appearance(ctx);
                     }
                     ui.label(portable_path("theme.json").parent().unwrap_or(Path::new(".")).display().to_string());
+                    ui.separator();
+                    ui.label(format!("Версия {VERSION}"));
+                    if ui.add_enabled(self.updater.can_check(), animated_button(egui::Button::new("Проверить обновления"))).clicked() {
+                        self.updater.check(true);
+                        self.notify("Проверяем обновления…");
+                    }
                 });
             });
             self.show_settings = open;
@@ -1596,6 +1605,11 @@ impl eframe::App for BunkerApp {
                 }
             });
         self.ui_overlays(ctx);
+        let can_install = self.room.is_none() && self.pending.is_none() && self.room_deadline.is_none()
+            && !self.show_create && !self.show_join && !self.show_settings && !self.show_avatar_picker;
+        if let Some(message) = self.updater.poll(ctx, can_install) {
+            self.notify(message);
+        }
         self.show_toast(ctx);
         if self.pending.is_some() || self.room_deadline.is_some() || self.upload_pending.is_some() || self.download_pending.is_some() {
             ctx.request_repaint_after(Duration::from_millis(80));
