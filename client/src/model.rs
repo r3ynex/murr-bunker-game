@@ -28,6 +28,8 @@ pub struct Room {
     #[serde(default)]
     pub event_chance: u32,
     #[serde(default)]
+    pub can_swap_cards: bool,
+    #[serde(default)]
     pub category_labels: HashMap<String, String>,
     pub vote_open: bool,
     pub ballots_count: usize,

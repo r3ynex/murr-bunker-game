@@ -267,6 +267,8 @@ pub fn input_row(
     )
 }
 
+pub const TABLE_CELL_PADDING: f32 = 4.0;
+
 pub fn table_cell(
     ui: &mut Ui,
     size: [f32; 2],
@@ -284,7 +286,7 @@ pub fn table_cell(
     );
     let mut cell = ui.new_child(
         egui::UiBuilder::new()
-            .max_rect(rect.shrink(4.0))
+            .max_rect(rect.shrink(TABLE_CELL_PADDING))
             .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
     cell.set_clip_rect(rect.intersect(ui.clip_rect()));

@@ -3,6 +3,7 @@ import { DEFAULT_PACK, normalizePack, drawCard, drawScenario } from "./content.j
 import { readBundle, sha256Hex, MAX_ZIP_BYTES } from "./bundle.js";
 import { avatarFrom, publicAvatar } from "./avatars.js";
 import { addInventoryItem, inventoryItems, isInventory, replaceInventory, transferInventory } from "./inventory.js";
+import { swapCards } from "./cards.js";
 import { unzipSync } from "fflate";
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), {
@@ -181,6 +182,7 @@ export class Room extends DurableObject {
       round: state.round, seats: state.seats, catastrophe: state.catastrophe,
       bunker: state.bunker, packName: state.pack.name, bundle: state.bundle || null,
       eventChance: state.eventChance ?? 0,
+      canSwapCards: true,
       categoryLabels: { ...state.pack.categoryLabels, ability2: "Спец. возможность 2" }, voteOpen: state.voteOpen,
       ballotsCount: Object.keys(state.ballots).length, voteResults: state.voteResults,
       log: state.log, connected: this.ctx.getWebSockets().length,
@@ -214,7 +216,7 @@ export class Room extends DurableObject {
       const data = JSON.parse(message);
       if (!data || typeof data !== "object") throw Error("Некорректная команда");
       const host = me.id === state.hostId;
-      const hostOnly = ["start", "start_vote", "finish_vote", "next_round", "set_active", "set_seats", "set_pack", "finish", "set_event_chance", "host_edit_card", "host_redraw_card", "host_reveal_card", "host_add_item", "host_transfer_items"];
+      const hostOnly = ["start", "start_vote", "finish_vote", "next_round", "set_active", "set_seats", "set_pack", "finish", "set_event_chance", "host_edit_card", "host_redraw_card", "host_reveal_card", "host_add_item", "host_transfer_items", "host_swap_cards"];
       if (hostOnly.includes(data.type) && !host) throw Error("Только ведущий может выполнить действие");
       if (data.type === "set_pack") {
         if (state.stage !== "lobby") throw Error("Менять пак можно только до старта");
@@ -269,6 +271,10 @@ export class Room extends DurableObject {
         if (card.revealed) throw Error("Карта уже открыта");
         card.revealed = true;
         this.note(state, me.name + " открыл(а): " + data.kind);
+      } else if (data.type === "host_swap_cards") {
+        if (state.stage !== "playing") throw Error("Обмен доступен во время игры");
+        swapCards(state, data);
+        this.note(state, "Ведущий обменял характеристики игроков");
       } else if (data.type === "host_transfer_items") {
         if (state.stage !== "playing") throw Error("Передача доступна во время игры");
         transferInventory(state, data);

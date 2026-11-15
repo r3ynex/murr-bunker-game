@@ -1,6 +1,6 @@
 use crate::model::{category_name, AvatarId, Card, LocalConfig, Room, Session};
 use crate::appearance::{portable_path, with_icon, FontWeight, Layout, Theme};
-use crate::artwork::{centered_row, flat_button, input_row, paint_contain, paint_cover, paint_gradient, table_cell, Artwork, Icon};
+use crate::artwork::{centered_row, flat_button, input_row, paint_contain, paint_cover, paint_gradient, table_cell, Artwork, Icon, TABLE_CELL_PADDING};
 use crate::avatars::Avatars;
 use crate::network;
 use crate::motion::{animated_button, button_highlight, modal_opacity, screen_opacity};
@@ -102,11 +102,6 @@ fn bunker_description(text: &str, theme: &Theme, width: f32) -> Vec<(egui::text:
     }).collect()
 }
 
-fn card_text(text: &str) -> String {
-    let trimmed = text.lines().next().unwrap_or("");
-    let short: String = trimmed.chars().take(38).collect();
-    if trimmed.chars().count() > 38 { format!("{short}…") } else { short }
-}
 fn appearance_warnings(warnings: [Option<String>; 3]) -> String {
     warnings.into_iter().flatten().collect::<Vec<_>>().join("\n")
 }
@@ -956,7 +951,7 @@ impl BunkerApp {
         self.transfer_target = None;
     }
 
-    fn inventory_transfer(&mut self, ui: &mut egui::Ui, player_id: &str, kind: &str) -> bool {
+    fn inventory_items(&mut self, ui: &mut egui::Ui, player_id: &str, kind: &str) -> bool {
         let Some(room) = &self.room else { return false; };
         let Some(items) = room.players.iter().find(|player| player.id == player_id)
             .and_then(|player| player.revealed_card(kind))
@@ -987,9 +982,20 @@ impl BunkerApp {
 
         ui.add(egui::TextEdit::singleline(&mut self.transfer_ids).hint_text("ID предметов через запятую")
             .char_limit(600).desired_width(f32::INFINITY));
+        true
+    }
+
+    fn card_exchange(&mut self, ui: &mut egui::Ui, player_id: &str, kind: &str, inventory: bool) {
+        let Some(room) = &self.room else { return; };
+        let can_swap = room.can_swap_cards;
+        let can_transfer = inventory && !self.transfer_ids.trim().is_empty();
+        if !can_swap && !inventory {
+            ui.label("Для обмена характеристиками нужно обновить сервер");
+            return;
+        }
         let selected = room.players.iter().find(|player| self.transfer_target.as_deref() == Some(player.id.as_str()));
         egui::ComboBox::from_id_salt("inventory-recipient")
-            .selected_text(selected.map_or("Выбрать получателя", |player| player.name.as_str()))
+            .selected_text(selected.map_or("Выбрать другого игрока", |player| player.name.as_str()))
             .show_ui(ui, |ui| {
                 for player in room.players.iter().filter(|player| player.id != player_id) {
                     if ui.selectable_label(self.transfer_target.as_ref() == Some(&player.id), &player.name).clicked() {
@@ -997,12 +1003,19 @@ impl BunkerApp {
                     }
                 }
             });
-        let enabled = self.online && selected.is_some() && !self.transfer_ids.trim().is_empty();
-        if ui.add_enabled(enabled, animated_button(self.theme.accent_button("Передать выбранное"))).clicked() {
-            self.send(json!({"type":"host_transfer_items","playerId":player_id,"targetId":self.transfer_target,"kind":kind,"itemIds":self.transfer_ids}));
-            self.transfer_ids.clear();
-        }
-        true
+        let enabled = self.online && room.players.iter().any(|player| self.transfer_target.as_ref() == Some(&player.id));
+        ui.horizontal_wrapped(|ui| {
+            if ui.add_enabled(enabled && can_swap, animated_button(egui::Button::new("Обменять карточки")))
+                .on_hover_text("Поменять местами карточки этой категории целиком").clicked()
+            {
+                self.send(json!({"type":"host_swap_cards","playerId":player_id,"targetId":self.transfer_target,"kind":kind}));
+                self.editor = None;
+            }
+            if inventory && ui.add_enabled(enabled && can_transfer, animated_button(self.theme.accent_button("Передать выбранное"))).clicked() {
+                self.send(json!({"type":"host_transfer_items","playerId":player_id,"targetId":self.transfer_target,"kind":kind,"itemIds":self.transfer_ids}));
+                self.transfer_ids.clear();
+            }
+        });
     }
 
     fn overview_section(&mut self, ui: &mut egui::Ui, room: &Room) {
@@ -1018,7 +1031,12 @@ impl BunkerApp {
         ));
         ui.vertical_centered(|ui| { ui.add(egui::Label::new(heading)); });
         ui.add_space(self.theme.spacing.heading_gap);
-        let keys = ["gender", "body", "personality", "profession", "health", "hobby", "fear", "equipment", "backpack", "fact"];
+        let mut keys = vec!["gender", "body", "personality", "profession", "health", "hobby", "fear", "equipment", "backpack", "fact"];
+        let mut extra: Vec<_> = room.category_labels.keys().map(String::as_str)
+            .filter(|kind| !keys.contains(kind) && !matches!(*kind, "ability" | "ability2" | "talent"))
+            .collect();
+        extra.sort_unstable();
+        keys.extend(extra);
         self.player_table(ui, room, "player-matrix", &keys, self.layout.players_cell_size);
         ui.add_space(TABLE_BOTTOM_GAP);
     }
@@ -1058,12 +1076,25 @@ impl BunkerApp {
                     }
                     for player in &room.players {
                         ui.end_row();
+                        let text_width = (cell[0] - TABLE_CELL_PADDING * 2.0).max(1.0);
+                        let cards = keys.iter().map(|&kind| {
+                            let card = player.revealed_card(kind)?;
+                            let galley = ui.painter().layout(
+                                card.dossier_text().0.to_owned(),
+                                FontWeight::Medium.font(text_size),
+                                self.theme.palette.text.color(),
+                                text_width,
+                            );
+                            Some((card, galley))
+                        }).collect::<Vec<_>>();
+                        let row_height = cards.iter().flatten().map(|(_, galley)| galley.size().y + TABLE_CELL_PADDING * 2.0)
+                            .fold(cell[1], f32::max);
                         let fill = if player.active {
                             Color32::TRANSPARENT
                         } else {
                             self.theme.palette.surface.color()
                         };
-                        table_cell(ui, [player_width, cell[1]], line, fill, |ui| {
+                        table_cell(ui, [player_width, row_height], line, fill, |ui| {
                             let avatar_size = (35.0 * scale).min(ui.available_height());
                             self.avatar_widget(ui, player.avatar(), false, avatar_size);
                             let rect = ui.max_rect();
@@ -1100,13 +1131,15 @@ impl BunkerApp {
                                 }
                             }
                         });
-                        for &kind in keys {
-                            let card = player.revealed_card(kind);
-                            table_cell(ui, cell, line, fill, |ui| {
-                                let width = ui.available_width();
-                                let edit_size = (18.0 * scale).min(width * 0.4);
+                        for (&kind, entry) in keys.iter().zip(cards) {
+                            table_cell(ui, [cell[0], row_height], line, fill, |ui| {
+                                let rect = ui.max_rect();
+                                let card = entry.map(|(card, galley)| {
+                                    ui.add(egui::Label::new(galley)).on_hover_text(&card.value);
+                                    card
+                                });
                                 if host {
-                                    let rect = ui.max_rect();
+                                    let edit_size = (18.0 * scale).min(rect.width() * 0.4);
                                     let edit_rect = egui::Rect::from_center_size(
                                         egui::pos2(rect.right() - edit_size / 2.0, rect.center().y),
                                         egui::Vec2::splat(edit_size),
@@ -1114,19 +1147,11 @@ impl BunkerApp {
                                     let icon = self.artwork.button(Icon::Edit, &self.theme.icons.edit, edit_size * 0.72).frame(false);
                                     let response = ui.place(edit_rect, |ui: &mut egui::Ui| {
                                         ui.multiply_opacity(0.5);
-                                        ui.add(animated_button(icon))
+                                        ui.add_sized(edit_rect.size(), animated_button(icon))
                                     });
                                     if response.on_hover_text("Изменить карточку").clicked() {
                                         self.edit_card(&player.id, kind, card);
                                     }
-                                }
-                                if let Some(card) = card {
-                                    let text_width = if host { (width - edit_size - 4.0).max(1.0) } else { width };
-                                    let rect = egui::Rect::from_min_size(ui.max_rect().min, egui::vec2(text_width, ui.max_rect().height()));
-                                    let mut text_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect)
-                                        .layout(egui::Layout::left_to_right(egui::Align::Center)));
-                                    text_ui.add(egui::Label::new(FontWeight::Medium.text(text_size, card_text(&card.value))).wrap())
-                                        .on_hover_text(&card.value);
                                 }
                             });
                         }
@@ -1517,9 +1542,12 @@ impl BunkerApp {
                 if !active { ui.disable(); }
                 let name = self.room.as_ref().and_then(|room| room.category_labels.get(&kind))
                     .map(String::as_str).unwrap_or_else(|| category_name(&kind));
-                ui.label(format!("{name} · Изменения видны всем после раскрытия"));
-                let inventory = self.inventory_transfer(ui, &player, &kind);
-                if inventory { ui.separator(); }
+                let player_name = self.room.as_ref().and_then(|room| room.players.iter().find(|p| p.id == player))
+                    .map_or("Игрок", |p| p.name.as_str());
+                ui.label(FontWeight::SemiBold.text(self.theme.fonts.body, format!("{player_name} · {name}")));
+                let inventory = self.inventory_items(ui, &player, &kind);
+                self.card_exchange(ui, &player, &kind, inventory);
+                ui.separator();
                 ui.add(egui::TextEdit::multiline(&mut self.editor_value)
                     .hint_text(if inventory { "Название или описание предмета" } else { "Текст характеристики" })
                     .desired_rows(3).desired_width(450.0));
