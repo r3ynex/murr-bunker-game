@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { DEFAULT_PACK, normalizePack, drawCard, drawScenario } from "./content.js";
 import { readBundle, sha256Hex, MAX_ZIP_BYTES } from "./bundle.js";
 import { avatarFrom, publicAvatar } from "./avatars.js";
+import { addInventoryItem, inventoryItems, isInventory, replaceInventory, transferInventory } from "./inventory.js";
 import { unzipSync } from "fflate";
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), {
@@ -187,7 +188,8 @@ export class Room extends DurableObject {
         id: p.id, name: p.name, ...publicAvatar(p.avatar),
         ready: p.ready ?? (p.id === state.hostId), active: p.active,
         cards: p.cards.filter(c => p.id === viewerId || c.revealed)
-          .map(c => ({ kind: c.kind, value: c.value, revealed: c.revealed, description: c.description }))
+          .map(c => ({ kind: c.kind, value: c.value, revealed: c.revealed, description: c.description,
+            items: isInventory(c.kind) ? inventoryItems(c) : undefined }))
       }))
     };
   }
@@ -212,7 +214,7 @@ export class Room extends DurableObject {
       const data = JSON.parse(message);
       if (!data || typeof data !== "object") throw Error("Некорректная команда");
       const host = me.id === state.hostId;
-      const hostOnly = ["start", "start_vote", "finish_vote", "next_round", "set_active", "set_seats", "set_pack", "finish", "set_event_chance", "host_edit_card", "host_redraw_card", "host_reveal_card"];
+      const hostOnly = ["start", "start_vote", "finish_vote", "next_round", "set_active", "set_seats", "set_pack", "finish", "set_event_chance", "host_edit_card", "host_redraw_card", "host_reveal_card", "host_add_item", "host_transfer_items"];
       if (hostOnly.includes(data.type) && !host) throw Error("Только ведущий может выполнить действие");
       if (data.type === "set_pack") {
         if (state.stage !== "lobby") throw Error("Менять пак можно только до старта");
@@ -252,6 +254,9 @@ export class Room extends DurableObject {
         state.players.forEach(p => {
           p.active = true;
           p.cards = state.pack.categoryOrder.map(kind => drawCard(state.pack, kind));
+          for (const card of p.cards) {
+            if (isInventory(card.kind)) replaceInventory(state, card, card.value, card.description);
+          }
           if (state.pack.categories.ability?.length > 1) {
             p.cards.push({ ...drawCard(state.pack, "ability"), kind: "ability2" });
           }
@@ -264,25 +269,40 @@ export class Room extends DurableObject {
         if (card.revealed) throw Error("Карта уже открыта");
         card.revealed = true;
         this.note(state, me.name + " открыл(а): " + data.kind);
-      } else if (["host_edit_card", "host_redraw_card", "host_reveal_card"].includes(data.type)) {
+      } else if (data.type === "host_transfer_items") {
+        if (state.stage !== "playing") throw Error("Передача доступна во время игры");
+        transferInventory(state, data);
+        this.note(state, "Ведущий перенёс предметы между игроками");
+      } else if (["host_edit_card", "host_redraw_card", "host_reveal_card", "host_add_item"].includes(data.type)) {
         if (state.stage !== "playing") throw Error("Игра ещё не началась");
         const player = state.players.find(p => p.id === data.playerId);
         const card = player?.cards.find(c => c.kind === data.kind);
         if (!card) throw Error("Карта игрока не найдена");
-        if (data.type === "host_edit_card") {
+        if (data.type === "host_add_item") {
+          if (!isInventory(card.kind)) throw Error("Добавлять предметы можно только в инвентарь или рюкзак");
+          addInventoryItem(state, card, data.value);
+        } else if (data.type === "host_edit_card") {
           if (typeof data.value !== "string" || !data.value.trim() || data.value.length > 2000) {
             throw Error("Текст карты от 1 до 2000 символов");
           }
-          card.value = data.value.trim();
-          card.description = "";
+          if (isInventory(card.kind)) {
+            replaceInventory(state, card, data.value.trim(), "");
+          } else {
+            card.value = data.value.trim();
+            card.description = "";
+          }
         } else if (data.type === "host_reveal_card") {
           card.revealed = true;
         } else {
           const category = data.kind === "ability2" ? "ability" : data.kind;
           if (!state.pack.categories[category]) throw Error("Категория не найдена");
           const fresh = drawCard(state.pack, category);
-          card.value = fresh.value;
-          card.description = fresh.description;
+          if (isInventory(card.kind)) {
+            replaceInventory(state, card, fresh.value, fresh.description);
+          } else {
+            card.value = fresh.value;
+            card.description = fresh.description;
+          }
           // Preserve visibility; never secretly hide a card that was already revealed.
         }
         this.note(state, "Ведущий изменил карточку игрока " + player.name);

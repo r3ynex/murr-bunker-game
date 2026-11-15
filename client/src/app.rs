@@ -1,6 +1,6 @@
 use crate::model::{category_name, AvatarId, Card, LocalConfig, Room, Session};
 use crate::appearance::{portable_path, with_icon, FontWeight, Layout, Theme};
-use crate::artwork::{centered_row, flat_button, input_row, paint_cover, paint_gradient, table_cell, Artwork, Icon};
+use crate::artwork::{centered_row, flat_button, input_row, paint_contain, paint_cover, paint_gradient, table_cell, Artwork, Icon};
 use crate::avatars::Avatars;
 use crate::network;
 use crate::motion::{animated_button, button_highlight, modal_opacity, screen_opacity};
@@ -146,6 +146,8 @@ pub struct BunkerApp {
     show_survivability: bool,
     editor: Option<(String, String)>,
     editor_value: String,
+    transfer_ids: String,
+    transfer_target: Option<String>,
     pending_section: Option<usize>,
     active_section: usize,
     dice_sides: u32,
@@ -191,7 +193,8 @@ impl BunkerApp {
             create_on_connect: false,
             show_avatar_picker: false, show_join: false, show_create: false,
             show_settings: false, show_host_tools: false, show_survivability: false,
-            editor: None, editor_value: String::new(), pending_section: None, active_section: 0,
+            editor: None, editor_value: String::new(), transfer_ids: String::new(), transfer_target: None,
+            pending_section: None, active_section: 0,
             dice_sides: 6, event_chance: 0,
             pack_json: None,
             room_packs: Vec::new(), pack_zip: None,
@@ -677,6 +680,10 @@ impl BunkerApp {
 
     fn hero(&mut self, ui: &mut egui::Ui, room: &Room) {
         let width = ui.available_width();
+        let width_scale = (width / self.layout.window_size[0]).min(1.0);
+        let base_height = (self.layout.hero_height * width_scale).min(ui.clip_rect().height());
+        let scale = base_height / self.layout.hero_height;
+        let font_scale = scale.max(0.8);
         let [horizontal_inset, vertical_inset] = self.layout.hero_inset;
         let text_width = self.layout.hero_text_size[0].min((width - 2.0 * horizontal_inset).max(1.0));
         let color = self.theme.palette.text.color();
@@ -685,22 +692,27 @@ impl BunkerApp {
             ("Катаклизм".to_owned(), FontWeight::Bold.font(self.theme.fonts.heading)),
             (room.catastrophe.clone(), FontWeight::Regular.font(self.theme.fonts.hero_body)),
             (format!("Раунд {} · Выживших: {survivors}", room.round), FontWeight::Regular.font(self.theme.fonts.hero_body)),
-        ].map(|(text, font)| {
+        ].map(|(text, mut font)| {
+            font.size *= font_scale;
             let mut job = egui::text::LayoutJob::simple(text, font, color, text_width);
             job.halign = egui::Align::Center;
             ui.fonts_mut(|fonts| fonts.layout_job(job))
         });
-        let gap = 30.0;
+        let gap = 30.0 * scale;
         let group_height = text.iter().map(|galley| galley.size().y).sum::<f32>() + 2.0 * gap;
-        let height = self.layout.hero_height.max(group_height + 2.0 * vertical_inset);
+        let height = base_height.max(group_height + 2.0 * vertical_inset * scale);
         let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0u8, self.theme.palette.hero.color());
-        if let Some(texture) = &self.hero_texture {
-            paint_cover(&painter, texture, rect);
-            painter.add(paint_gradient(rect, Color32::from_black_alpha(100), self.theme.palette.background.color(), true));
-        } else if let Some(texture) = &self.artwork.catastrophe {
-            paint_cover(&painter, texture, rect);
+        if let Some(texture) = self.hero_texture.as_ref().or(self.artwork.catastrophe.as_ref()) {
+            if scale < 1.0 {
+                paint_contain(&painter, texture, rect);
+            } else {
+                paint_cover(&painter, texture, rect);
+            }
+            if self.hero_texture.is_some() {
+                painter.add(paint_gradient(rect, Color32::from_black_alpha(100), self.theme.palette.background.color(), true));
+            }
         }
 
         let center = rect.center();
@@ -931,9 +943,63 @@ impl BunkerApp {
         });
     }
 
-    fn edit_card(&mut self, player_id: &str, kind: &str, value: &str) {
+    fn edit_card(&mut self, player_id: &str, kind: &str, card: Option<&Card>) {
         self.editor = Some((player_id.to_owned(), kind.to_owned()));
-        self.editor_value = value.to_owned();
+        self.editor_value = card
+            .filter(|card| card.items.is_none())
+            .map(|card| card.value.clone())
+            .unwrap_or_default();
+        self.transfer_ids.clear();
+        self.transfer_target = None;
+    }
+
+    fn inventory_transfer(&mut self, ui: &mut egui::Ui, player_id: &str, kind: &str) -> bool {
+        let Some(room) = &self.room else { return false; };
+        let Some(items) = room.players.iter().find(|player| player.id == player_id)
+            .and_then(|player| player.revealed_card(kind))
+            .and_then(|card| card.items.as_deref()) else { return false; };
+
+        ui.label(FontWeight::SemiBold.text(self.theme.fonts.body, "Предметы в ячейке"));
+        if items.is_empty() {
+            ui.label("Пусто");
+            return true;
+        }
+
+        egui::ScrollArea::vertical().id_salt(("transfer-items", player_id, kind))
+            .max_height(160.0).show(ui, |ui| {
+                for item in items {
+                    ui.horizontal_top(|ui| {
+                        let mut ids: Vec<_> = self.transfer_ids.split(',').map(str::trim)
+                            .filter(|id| !id.is_empty()).collect();
+                        let mut checked = ids.contains(&item.id.as_str());
+                        if ui.checkbox(&mut checked, &item.id).changed() {
+                            ids.retain(|id| *id != item.id.as_str());
+                            if checked { ids.push(&item.id); }
+                            self.transfer_ids = ids.join(", ");
+                        }
+                        ui.add(egui::Label::new(&item.value).wrap());
+                    });
+                }
+            });
+
+        ui.add(egui::TextEdit::singleline(&mut self.transfer_ids).hint_text("ID предметов через запятую")
+            .char_limit(600).desired_width(f32::INFINITY));
+        let selected = room.players.iter().find(|player| self.transfer_target.as_deref() == Some(player.id.as_str()));
+        egui::ComboBox::from_id_salt("inventory-recipient")
+            .selected_text(selected.map_or("Выбрать получателя", |player| player.name.as_str()))
+            .show_ui(ui, |ui| {
+                for player in room.players.iter().filter(|player| player.id != player_id) {
+                    if ui.selectable_label(self.transfer_target.as_ref() == Some(&player.id), &player.name).clicked() {
+                        self.transfer_target = Some(player.id.clone());
+                    }
+                }
+            });
+        let enabled = self.online && selected.is_some() && !self.transfer_ids.trim().is_empty();
+        if ui.add_enabled(enabled, animated_button(self.theme.accent_button("Передать выбранное"))).clicked() {
+            self.send(json!({"type":"host_transfer_items","playerId":player_id,"targetId":self.transfer_target,"kind":kind,"itemIds":self.transfer_ids}));
+            self.transfer_ids.clear();
+        }
+        true
     }
 
     fn overview_section(&mut self, ui: &mut egui::Ui, room: &Room) {
@@ -998,7 +1064,7 @@ impl BunkerApp {
                             let avatar_size = (35.0 * scale).min(ui.available_height());
                             self.avatar_widget(ui, player.avatar(), false, avatar_size);
                             let rect = ui.max_rect();
-                            let left = ui.next_widget_position().x;
+                            let left = ui.next_widget_position().x + 8.0 * scale;
                             let width = (rect.right() - left).max(1.0);
                             let label_height = text_size * 1.45;
                             let has_action = host || !player.active;
@@ -1016,6 +1082,7 @@ impl BunkerApp {
                                 let mut action_ui = ui.new_child(egui::UiBuilder::new().max_rect(action_rect)
                                     .layout(egui::Layout::left_to_right(egui::Align::Center)));
                                 if host {
+                                    action_ui.spacing_mut().button_padding.x = 0.0;
                                     let (label, color) = if player.active {
                                         ("Выгнать", self.theme.palette.negative.color())
                                     } else {
@@ -1047,7 +1114,7 @@ impl BunkerApp {
                                         ui.add(animated_button(icon))
                                     });
                                     if response.on_hover_text("Изменить карточку").clicked() {
-                                        self.edit_card(&player.id, kind, card.map(|card| card.value.as_str()).unwrap_or(""));
+                                        self.edit_card(&player.id, kind, card);
                                     }
                                 }
                                 if let Some(card) = card {
@@ -1437,13 +1504,24 @@ impl BunkerApp {
         if let Some((player, kind)) = ctx.data(|data| data.get_temp::<(String, String)>(editor_id)) {
             let mut open = active;
             egui::Window::new("Редактор характеристики ведущего").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open).fade_in(true).fade_out(true).interactable(active)
-                .default_width(470.0).show(ctx, |ui| {
+                .default_width(470.0).max_width(520.0).show(ctx, |ui| {
                 if !active { ui.disable(); }
-                ui.label(format!("Категория: {} · Редактирование видно всем после раскрытия", kind));
+                let name = self.room.as_ref().and_then(|room| room.category_labels.get(&kind))
+                    .map(String::as_str).unwrap_or_else(|| category_name(&kind));
+                ui.label(format!("{name} · Изменения видны всем после раскрытия"));
+                let inventory = self.inventory_transfer(ui, &player, &kind);
+                if inventory { ui.separator(); }
                 ui.add(egui::TextEdit::multiline(&mut self.editor_value)
+                    .hint_text(if inventory { "Название или описание предмета" } else { "Текст характеристики" })
                     .desired_rows(3).desired_width(450.0));
                 ui.horizontal_wrapped(|ui| {
-                    if ui.add(animated_button(egui::Button::new("Применить текст"))).clicked() {
+                    let has_text = self.online && !self.editor_value.trim().is_empty();
+                    if inventory && ui.add_enabled(has_text, animated_button(egui::Button::new("Добавить предмет"))).clicked() {
+                        self.send(json!({"type":"host_add_item","playerId":player,"kind":kind,"value":self.editor_value}));
+                        self.editor_value.clear();
+                    }
+                    let apply = if inventory { "Заменить содержимое" } else { "Применить текст" };
+                    if ui.add_enabled(has_text, animated_button(egui::Button::new(apply))).clicked() {
                         self.send(json!({"type":"host_edit_card","playerId":player,"kind":kind,"value":self.editor_value}));
                         self.editor = None;
                     }

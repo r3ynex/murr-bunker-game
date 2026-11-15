@@ -71,6 +71,14 @@ pub struct Card {
     pub revealed: bool,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default)]
+    pub items: Option<Vec<InventoryItem>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InventoryItem {
+    pub id: String,
+    pub value: String,
 }
 
 impl Card {
