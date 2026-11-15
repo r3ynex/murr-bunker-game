@@ -3,7 +3,7 @@ import { DEFAULT_PACK, normalizePack, drawCard, drawScenario } from "./content.j
 import { readBundle, sha256Hex, MAX_ZIP_BYTES } from "./bundle.js";
 import { avatarFrom, publicAvatar } from "./avatars.js";
 import { addInventoryItem, inventoryItems, isInventory, replaceInventory, transferInventory } from "./inventory.js";
-import { swapCards } from "./cards.js";
+import { healthDegree, setHealthDegree, swapCards } from "./cards.js";
 import { unzipSync } from "fflate";
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), {
@@ -183,6 +183,7 @@ export class Room extends DurableObject {
       bunker: state.bunker, packName: state.pack.name, bundle: state.bundle || null,
       eventChance: state.eventChance ?? 0,
       canSwapCards: true,
+      canSetHealthDegree: true,
       categoryLabels: { ...state.pack.categoryLabels, ability2: "Спец. возможность 2" }, voteOpen: state.voteOpen,
       ballotsCount: Object.keys(state.ballots).length, voteResults: state.voteResults,
       log: state.log, connected: this.ctx.getWebSockets().length,
@@ -191,7 +192,8 @@ export class Room extends DurableObject {
         ready: p.ready ?? (p.id === state.hostId), active: p.active,
         cards: p.cards.filter(c => p.id === viewerId || c.revealed)
           .map(c => ({ kind: c.kind, value: c.value, revealed: c.revealed, description: c.description,
-            items: isInventory(c.kind) ? inventoryItems(c) : undefined }))
+            items: isInventory(c.kind) ? inventoryItems(c) : undefined,
+            healthDegree: c.kind === "health" ? healthDegree(c, state.pack.categories?.health) : undefined }))
       }))
     };
   }
@@ -216,7 +218,7 @@ export class Room extends DurableObject {
       const data = JSON.parse(message);
       if (!data || typeof data !== "object") throw Error("Некорректная команда");
       const host = me.id === state.hostId;
-      const hostOnly = ["start", "start_vote", "finish_vote", "next_round", "set_active", "set_seats", "set_pack", "finish", "set_event_chance", "host_edit_card", "host_redraw_card", "host_reveal_card", "host_add_item", "host_transfer_items", "host_swap_cards"];
+      const hostOnly = ["start", "start_vote", "finish_vote", "next_round", "set_active", "set_seats", "set_pack", "finish", "set_event_chance", "host_edit_card", "host_redraw_card", "host_reveal_card", "host_add_item", "host_transfer_items", "host_swap_cards", "host_set_health_degree"];
       if (hostOnly.includes(data.type) && !host) throw Error("Только ведущий может выполнить действие");
       if (data.type === "set_pack") {
         if (state.stage !== "lobby") throw Error("Менять пак можно только до старта");
@@ -279,12 +281,15 @@ export class Room extends DurableObject {
         if (state.stage !== "playing") throw Error("Передача доступна во время игры");
         transferInventory(state, data);
         this.note(state, "Ведущий перенёс предметы между игроками");
-      } else if (["host_edit_card", "host_redraw_card", "host_reveal_card", "host_add_item"].includes(data.type)) {
+      } else if (["host_edit_card", "host_redraw_card", "host_reveal_card", "host_add_item", "host_set_health_degree"].includes(data.type)) {
         if (state.stage !== "playing") throw Error("Игра ещё не началась");
         const player = state.players.find(p => p.id === data.playerId);
-        const card = player?.cards.find(c => c.kind === data.kind);
+        const kind = data.type === "host_set_health_degree" ? "health" : data.kind;
+        const card = player?.cards.find(c => c.kind === kind);
         if (!card) throw Error("Карта игрока не найдена");
-        if (data.type === "host_add_item") {
+        if (data.type === "host_set_health_degree") {
+          setHealthDegree(card, data.degree, state.pack.categories?.health);
+        } else if (data.type === "host_add_item") {
           if (!isInventory(card.kind)) throw Error("Добавлять предметы можно только в инвентарь или рюкзак");
           addInventoryItem(state, card, data.value);
         } else if (data.type === "host_edit_card") {
@@ -296,6 +301,7 @@ export class Room extends DurableObject {
           } else {
             card.value = data.value.trim();
             card.description = "";
+            if (card.kind === "health") delete card.health;
           }
         } else if (data.type === "host_reveal_card") {
           card.revealed = true;
@@ -308,6 +314,7 @@ export class Room extends DurableObject {
           } else {
             card.value = fresh.value;
             card.description = fresh.description;
+            if (card.kind === "health") card.health = fresh.health;
           }
           // Preserve visibility; never secretly hide a card that was already revealed.
         }

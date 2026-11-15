@@ -30,6 +30,8 @@ pub struct Room {
     #[serde(default)]
     pub can_swap_cards: bool,
     #[serde(default)]
+    pub can_set_health_degree: bool,
+    #[serde(default)]
     pub category_labels: HashMap<String, String>,
     pub vote_open: bool,
     pub ballots_count: usize,
@@ -75,6 +77,8 @@ pub struct Card {
     pub description: Option<String>,
     #[serde(default)]
     pub items: Option<Vec<InventoryItem>>,
+    #[serde(default, rename = "healthDegree")]
+    pub health_degree: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

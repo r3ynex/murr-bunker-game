@@ -143,6 +143,7 @@ pub struct BunkerApp {
     show_survivability: bool,
     editor: Option<(String, String)>,
     editor_value: String,
+    editor_health_degree: String,
     transfer_ids: String,
     transfer_target: Option<String>,
     pending_section: Option<usize>,
@@ -191,7 +192,8 @@ impl BunkerApp {
             create_on_connect: false,
             show_avatar_picker: false, show_join: false, show_create: false,
             show_settings: false, show_host_tools: false, show_survivability: false,
-            editor: None, editor_value: String::new(), transfer_ids: String::new(), transfer_target: None,
+            editor: None, editor_value: String::new(), editor_health_degree: String::new(),
+            transfer_ids: String::new(), transfer_target: None,
             pending_section: None, active_section: 0,
             dice_sides: 6, event_chance: 0,
             pack_json: None,
@@ -947,6 +949,7 @@ impl BunkerApp {
             .filter(|card| card.items.is_none())
             .map(|card| card.value.clone())
             .unwrap_or_default();
+        self.editor_health_degree = card.and_then(|card| card.health_degree.clone()).unwrap_or_default();
         self.transfer_ids.clear();
         self.transfer_target = None;
     }
@@ -983,6 +986,22 @@ impl BunkerApp {
         ui.add(egui::TextEdit::singleline(&mut self.transfer_ids).hint_text("ID предметов через запятую")
             .char_limit(600).desired_width(f32::INFINITY));
         true
+    }
+
+    fn edit_health_degree(&mut self, ui: &mut egui::Ui, player_id: &str) {
+        if !self.room.as_ref().is_some_and(|room| room.can_set_health_degree) {
+            ui.label("Для изменения степени здоровья нужно обновить сервер");
+            return;
+        }
+        ui.label("Степень здоровья");
+        ui.add(egui::TextEdit::singleline(&mut self.editor_health_degree)
+            .hint_text("Например, лёгкая степень").char_limit(160).desired_width(450.0));
+        if ui.add_enabled(self.online, animated_button(egui::Button::new("Сохранить степень")))
+            .on_hover_text("Пустое поле убирает степень").clicked()
+        {
+            self.send(json!({"type":"host_set_health_degree","playerId":player_id,"degree":self.editor_health_degree}));
+            self.editor = None;
+        }
     }
 
     fn card_exchange(&mut self, ui: &mut egui::Ui, player_id: &str, kind: &str, inventory: bool) {
@@ -1548,6 +1567,10 @@ impl BunkerApp {
                 let inventory = self.inventory_items(ui, &player, &kind);
                 self.card_exchange(ui, &player, &kind, inventory);
                 ui.separator();
+                if kind == "health" {
+                    self.edit_health_degree(ui, &player);
+                    ui.separator();
+                }
                 ui.add(egui::TextEdit::multiline(&mut self.editor_value)
                     .hint_text(if inventory { "Название или описание предмета" } else { "Текст характеристики" })
                     .desired_rows(3).desired_width(450.0));

@@ -1,6 +1,8 @@
 // Murr Pack v2: compact, data-only bundles produced from editable pack folders.
 // No user content is evaluated as code. Legacy v1 and Bunker Online exports remain importable.
 
+import { cardHeading } from "./cards.js";
+
 export const CATEGORIES = [
   "gender", "body", "personality", "profession", "health", "hobby",
   "fear", "equipment", "backpack", "fact", "ability"
@@ -313,9 +315,10 @@ export function drawCard(pack, kind) {
   if (kind === "body" && entry.height1 !== undefined) {
     details.push(randomInt(entry.height1, entry.height2) + " см");
   }
-  const title = entry.stage ? entry.title + " (" + entry.stage + ")" : entry.title;
+  const title = cardHeading(entry.title, entry.stage);
   return { kind, value: [title, ...details, entry.description].filter(Boolean).join("\n"),
-    revealed: false, description: entry.description ?? "" };
+    revealed: false, description: entry.description ?? "",
+    ...(kind === "health" && { health: { title: entry.title, degree: entry.stage ?? "" } }) };
 }
 export function drawScenario(pack) {
   const selected = pickEntry(pack.catastrophes);
