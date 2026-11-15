@@ -36,6 +36,7 @@ export function startGame(state) {
   state.stage = "playing";
   state.round = 1;
   state.speechEndsAt = 0;
+  state.diceRoll = null;
   resetVote(state);
   for (const player of state.players) {
     player.active = true;

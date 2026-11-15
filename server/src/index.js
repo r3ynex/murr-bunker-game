@@ -5,6 +5,7 @@ import { avatarFrom, publicAvatar } from "./avatars.js";
 import { addInventoryItem, inventoryItems, isInventory, removeInventoryItems, replaceInventory, transferInventory } from "./inventory.js";
 import { healthDegree, setHealthDegree, swapCards } from "./cards.js";
 import { applyHostAction, buildUndo, bunkerSections, hostSnapshot, startGame, undoHostAction } from "./host.js";
+import { publicDiceRoll, rollDice } from "./dice.js";
 import { unzipSync } from "fflate";
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), {
@@ -186,6 +187,7 @@ export class Room extends DurableObject {
       canSwapCards: true,
       canSetHealthDegree: true,
       speechEndsAt: state.speechEndsAt ?? 0,
+      diceRoll: publicDiceRoll(state),
       hostControls: viewerId === state.hostId ? {
         undo: Boolean(state.hasHostUndo),
         catastrophes: state.pack.catastrophes?.map(entry => entry.title) ?? [],
@@ -322,8 +324,7 @@ export class Room extends DurableObject {
       } else if (data.type === "roll") {
         if (state.stage !== "playing") throw Error("Броски доступны только во время игры");
         const sides = Number(data.sides);
-        if (!Number.isInteger(sides) || sides < 2 || sides > 100) throw Error("От 2 до 100 граней");
-        const value = (crypto.getRandomValues(new Uint32Array(1))[0] % sides) + 1;
+        const value = rollDice(state, me, sides);
         this.note(state, me.name + " бросил(а) d" + sides + ": " + value);
       } else if (data.type === "start_vote") {
         if (state.stage !== "playing") throw Error("Игра ещё не началась");

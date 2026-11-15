@@ -4,6 +4,7 @@ mod app;
 mod appearance;
 mod artwork;
 mod avatars;
+mod dice;
 mod host_panel;
 mod model;
 mod motion;

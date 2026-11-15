@@ -150,7 +150,7 @@ pub struct BunkerApp {
     transfer_target: Option<String>,
     pending_section: Option<usize>,
     active_section: usize,
-    dice_sides: u32,
+    dice: crate::dice::DiceOverlay,
     event_chance: u32,
     pack_json: Option<String>,
     room_packs: Vec<crate::packs::Entry>,
@@ -197,7 +197,7 @@ impl BunkerApp {
             editor: None, editor_value: String::new(), editor_health_degree: String::new(),
             transfer_ids: String::new(), transfer_target: None,
             pending_section: None, active_section: 0,
-            dice_sides: 6, event_chance: 0,
+            dice: crate::dice::DiceOverlay::default(), event_chance: 0,
             pack_json: None,
             room_packs: Vec::new(), pack_zip: None,
             upload_pending: None, pack_upload_failed: false, download_pending: None, background_key: None,
@@ -212,6 +212,7 @@ impl BunkerApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(layout.window_size.into()));
         }
         self.artwork.reload_icons(ctx);
+        self.dice.reload_meshes();
         self.avatars = Avatars::discover();
         self.theme = theme;
         self.layout = layout;
@@ -473,6 +474,7 @@ impl BunkerApp {
         self.sync_background(ctx);
     }
     fn update_room(&mut self, room: Room) {
+        self.dice.sync(room.dice_roll.as_ref());
         let joined = self.room.as_ref()
             .filter(|previous| previous.code == room.code && room.stage == "lobby")
             .and_then(|previous| room.players.iter().find(|player| {
@@ -496,6 +498,7 @@ impl BunkerApp {
         if self.online { self.send(json!({"type":"leave"})); }
         self.stop_websocket();
         self.room = None;
+        self.dice.sync(None);
         self.show_host_tools = false;
         self.host_panel = HostPanel::default();
         self.editor = None;
@@ -1250,9 +1253,8 @@ impl BunkerApp {
                 section_rule(ui, &self.theme);
             }
             ui.horizontal_wrapped(|ui| {
-                ui.add(egui::DragValue::new(&mut self.dice_sides).range(2..=100).prefix("d"));
-                if ui.add(animated_button(egui::Button::new("Бросить кубик"))).clicked() {
-                    self.send(json!({"type":"roll","sides":self.dice_sides}));
+                if let Some(sides) = crate::dice::roll_buttons(ui, self.online) {
+                    self.send(json!({"type":"roll","sides":sides}));
                 }
             });
             if room.vote_open {
@@ -1559,7 +1561,7 @@ impl BunkerApp {
                         if ui.add_enabled(self.pack_json.is_some(), animated_button(egui::Button::new("Применить выбранный пак"))).clicked() { self.apply_pack(); }
                     });
                 } else if room.you == room.host_id && matches!(room.stage.as_str(), "playing" | "finished") {
-                    match self.host_panel.show(ctx, &self.theme, room, &mut open, self.online, &mut self.dice_sides) {
+                    match self.host_panel.show(ctx, &self.theme, room, &mut open, self.online) {
                         Some(PanelAction::Send(command)) => self.send(command),
                         Some(PanelAction::EditCard { player, kind }) => {
                             let card = room.players.iter().find(|p| p.id == player)
@@ -1690,6 +1692,7 @@ impl eframe::App for BunkerApp {
             self.notify(message);
         }
         self.show_toast(ctx);
+        self.dice.show(ctx, &self.theme);
         if self.pending.is_some() || self.room_deadline.is_some() || self.upload_pending.is_some() || self.download_pending.is_some() {
             ctx.request_repaint_after(Duration::from_millis(80));
         }

@@ -175,7 +175,6 @@ impl HostPanel {
         room: &Room,
         open: &mut bool,
         online: bool,
-        dice_sides: &mut u32,
     ) -> Option<PanelAction> {
         let mut command = None;
         egui::Window::new("Панель ведущего")
@@ -223,7 +222,7 @@ impl HostPanel {
                         let playing = room.stage == "playing";
                         command = match self.tab {
                             Tab::Round => self
-                                .round(ui, room, online && playing, advanced && playing, dice_sides)
+                                .round(ui, room, online && playing, advanced && playing)
                                 .map(PanelAction::Send),
                             Tab::Cards => self.cards(ui, room, advanced && playing),
                             Tab::Bunker => self
@@ -266,7 +265,6 @@ impl HostPanel {
         room: &Room,
         enabled: bool,
         advanced: bool,
-        sides: &mut u32,
     ) -> Option<Value> {
         let mut command = None;
         ui.label("Таймер обсуждения");
@@ -313,9 +311,8 @@ impl HostPanel {
             }
         });
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.add(egui::DragValue::new(sides).range(2..=100).prefix("d"));
-            if button(ui, enabled, "Бросить кубик") {
+        ui.horizontal_wrapped(|ui| {
+            if let Some(sides) = crate::dice::roll_buttons(ui, enabled) {
                 command = Some(json!({"type":"roll","sides":sides}));
             }
         });

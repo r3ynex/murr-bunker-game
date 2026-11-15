@@ -2,6 +2,8 @@
    Temporary UI only. No game secrets or privileged actions are trusted here. */
 "use strict";
 
+import { syncDiceRoll } from "./dice.js";
+
 const $ = id => document.getElementById(id);
 let session = null;
 let room = null;
@@ -110,6 +112,7 @@ function connect() {
         const message = JSON.parse(event.data);
         if (message.type === "state") {
           room = message.data;
+          syncDiceRoll(room.diceRoll);
           render();
         } else if (message.type === "error") {
           setStatus(message.message || "Ошибка комнаты", true);
@@ -266,17 +269,9 @@ function render() {
       () => send(room.voteOpen ? "finish_vote" : "start_vote"));
     addButton(actions, "Завершить партию", () => send("finish"));
   }
-  const dice = element("select");
-  dice.setAttribute("aria-label", "Грани кубика");
-  dice.style.maxWidth = "100px";
-  for (const sides of [4, 6, 8, 10, 12, 20, 100]) {
-    const opt = element("option", "d" + sides);
-    opt.value = String(sides);
-    if (sides === 6) opt.selected = true;
-    dice.append(opt);
+  for (const sides of [6, 20]) {
+    addButton(actions, "Бросить D" + sides, () => send("roll", { sides }));
   }
-  actions.append(dice);
-  addButton(actions, "Бросить кубик", () => send("roll", { sides: Number(dice.value) }));
   scenario.append(actions);
   if (room.voteOpen) addText(scenario, "Голосование идёт! Принято голосов: " + room.ballotsCount, "p");
   for (const result of room.voteResults) addText(scenario, result.name + ": " + result.votes + " голос(ов)", "p", "note");
@@ -364,6 +359,7 @@ $("leave").addEventListener("click", () => {
   socket = null;
   connected = false;
   room = null;
+  syncDiceRoll(null);
   session = null;
   sessionStorage.removeItem("murr-mobile-session");
   $("room").hidden = true;

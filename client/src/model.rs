@@ -34,6 +34,8 @@ pub struct Room {
     #[serde(default)]
     pub speech_ends_at: u64,
     #[serde(default)]
+    pub dice_roll: Option<crate::dice::DiceRoll>,
+    #[serde(default)]
     pub host_controls: Option<HostControls>,
     #[serde(default)]
     pub category_labels: HashMap<String, String>,

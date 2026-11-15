@@ -7,12 +7,14 @@ on:
       - "client/**"
       - "packs/**"
       - "docs/**"
+      - "web/dice-models.json"
       - ".github/workflows/windows-build.yml"
   pull_request:
     branches: [main]
     paths:
       - "client/**"
       - "packs/**"
+      - "web/dice-models.json"
       - ".github/workflows/windows-build.yml"
   workflow_dispatch:
 
@@ -70,6 +72,7 @@ jobs:
             Get-ChildItem -LiteralPath packs -File -Force | Where-Object { $_.Extension -in '.json', '.zip' } | Copy-Item -Destination dist/packs -Force
           }
           Copy-Item client/theme.json, client/layout.json, client/APPEARANCE.md -Destination dist
+          Copy-Item web/dice-models.json -Destination dist
           Copy-Item client/assets/icons dist/icons -Recurse
           Copy-Item client/assets/fonts/Manrope-OFL.txt -Destination dist
           # Copy any custom avatar artwork with the EXE; no user-specific images in source by default.
