@@ -212,6 +212,8 @@ pub struct LocalConfig {
     pub nickname: String,
     #[serde(default = "default_avatar")]
     pub avatar: AvatarId,
+    #[serde(default = "default_true")]
+    pub discord_rpc: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -227,12 +229,17 @@ fn default_avatar() -> AvatarId {
     1
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Default for LocalConfig {
     fn default() -> Self {
         Self {
             server_url: "https://murr-bunker-api.r3ynex-error.workers.dev".to_owned(),
             nickname: String::new(),
             avatar: 1,
+            discord_rpc: true,
         }
     }
 }

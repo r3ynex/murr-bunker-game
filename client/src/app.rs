@@ -121,6 +121,8 @@ pub struct BunkerApp {
     layout: Layout,
     toast: Option<Toast>,
     updater: Updater,
+    discord_rpc: bool,
+    rpc: crate::discord_rpc::DiscordRpc,
     server_url: String,
     nickname: String,
     avatar: Option<AvatarId>,
@@ -191,6 +193,8 @@ impl BunkerApp {
                 started: Instant::now(),
             }),
             updater: Updater::new(),
+            discord_rpc: config.discord_rpc,
+            rpc: crate::discord_rpc::DiscordRpc::new(config.discord_rpc),
             server_url: config.server_url,
             nickname: config.nickname,
             avatar: if profile_ready { Some(config.avatar) } else { None },
@@ -279,6 +283,7 @@ impl BunkerApp {
             server_url: self.server_url.trim().trim_end_matches('/').to_owned(),
             nickname: self.nickname.trim().to_owned(),
             avatar: self.avatar.unwrap_or(1),
+            discord_rpc: self.discord_rpc,
         };
         match serde_json::to_string_pretty(&config)
             .map_err(|e| e.to_string())
@@ -2134,6 +2139,10 @@ impl BunkerApp {
                     ui.add_space(6.0);
                     ui.label("Адрес сервера:");
                     ui.add(egui::TextEdit::singleline(&mut self.server_url).desired_width(430.0));
+                    ui.add_space(6.0);
+                    if ui.checkbox(&mut self.discord_rpc, "Показывать статус в Discord (RPC)").changed() {
+                        self.rpc.set_enabled(self.discord_rpc);
+                    }
 
                     ui.add_space(6.0);
                     if ui.add(animated_button(self.theme.accent_button("Сохранить"))).clicked() {
@@ -2386,6 +2395,7 @@ impl eframe::App for BunkerApp {
         }
         self.show_toast(ctx);
         self.dice.show(ctx, &self.theme);
+        self.rpc.sync(self.room.as_ref());
         if self.pending.is_some() || self.room_deadline.is_some() || self.upload_pending.is_some() || self.download_pending.is_some() {
             ctx.request_repaint_after(Duration::from_millis(80));
         }

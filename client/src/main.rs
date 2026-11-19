@@ -5,6 +5,7 @@ mod appearance;
 mod artwork;
 mod avatars;
 mod dice;
+mod discord_rpc;
 mod host_panel;
 mod model;
 mod motion;
