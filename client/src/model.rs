@@ -3,12 +3,28 @@ use std::collections::HashMap;
 
 pub type AvatarId = u32;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
     pub code: String,
     pub player_id: String,
     pub token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedSession {
+    pub server_url: String,
+    pub session: Session,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameEvent {
+    pub round: u32,
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -28,6 +44,10 @@ pub struct Room {
     #[serde(default)]
     pub event_chance: u32,
     #[serde(default)]
+    pub current_event: Option<GameEvent>,
+    #[serde(default)]
+    pub event_history: Vec<GameEvent>,
+    #[serde(default)]
     pub can_swap_cards: bool,
     #[serde(default)]
     pub can_set_health_degree: bool,
@@ -40,6 +60,12 @@ pub struct Room {
     #[serde(default)]
     pub category_labels: HashMap<String, String>,
     pub vote_open: bool,
+    #[serde(default)]
+    pub vote_candidates: Option<Vec<String>>,
+    #[serde(default)]
+    pub vote_tied: bool,
+    #[serde(default)]
+    pub your_vote: Option<String>,
     pub ballots_count: usize,
     pub vote_results: Vec<VoteResult>,
     pub log: Vec<String>,
@@ -136,6 +162,8 @@ impl Card {
 
 fn is_card_measurement(line: &str) -> bool {
     line.strip_suffix(" лет")
+        .or_else(|| line.strip_suffix(" года"))
+        .or_else(|| line.strip_suffix(" год"))
         .or_else(|| line.strip_suffix(" см"))
         .is_some_and(|number| number.parse::<u32>().is_ok())
 }
@@ -172,6 +200,8 @@ where
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct VoteResult {
+    #[serde(default, rename = "playerId")]
+    pub player_id: Option<String>,
     pub name: String,
     pub votes: u32,
 }
@@ -187,6 +217,7 @@ pub struct LocalConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct BundleInfo {
     pub sha256: String,
+    #[allow(dead_code)]
     pub bytes: usize,
     #[serde(default)]
     pub background: Option<String>,
@@ -219,6 +250,7 @@ pub fn category_name(key: &str) -> &str {
         "backpack" => "Рюкзак",
         "fact" => "Доп. сведение",
         "ability" => "Спец. возможность",
+        "ability2" => "Спец. возможность 2",
         _ => key,
     }
 }
@@ -268,5 +300,23 @@ mod tests {
         assert!(player.revealed_card("profession").is_none());
         assert!(player.revealed_card("ability2").is_none());
         assert_eq!(player.revealed_card("ability").unwrap().value, "Repair");
+    }
+
+    #[test]
+    fn age_declension_measurements_are_recognized() {
+        for (line, expected) in [
+            ("21 год", true),
+            ("24 года", true),
+            ("37 лет", true),
+            ("175 см", true),
+            ("Описание", false),
+        ] {
+            assert_eq!(is_card_measurement(line), expected, "line: {line}");
+        }
+        let card: Card = serde_json::from_value(serde_json::json!({
+            "kind": "gender", "value": "Женщина\n21 год\nОписание", "revealed": false
+        }))
+        .unwrap();
+        assert_eq!(card.dossier_text(), ("Женщина\n21 год", Some("Описание")));
     }
 }

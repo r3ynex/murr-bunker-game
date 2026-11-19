@@ -87,18 +87,16 @@ pub fn connect(
     wake_up: impl Fn() + Send + 'static,
 ) -> Result<(WsSender, Receiver<WsEvent>), String> {
     let base = base_url.trim().trim_end_matches('/');
-    let url = if let Some(rest) = base.strip_prefix("https://") {
+    let ws_base = if let Some(rest) = base.strip_prefix("https://") {
         format!("wss://{rest}")
     } else if let Some(rest) = base.strip_prefix("http://") {
         format!("ws://{rest}")
     } else {
         return Err("Некорректный адрес сервера".into());
     };
-    // The token is opaque. Do not include this URL in any diagnostic.
-    let url = format!(
-        "{url}/api/rooms/{}/ws?token={}",
-        session.code, session.token
-    );
+    let url = format!("{ws_base}/api/rooms/{}/ws", session.code);
+    // Keep the opaque session token in the Authorization header rather than the URL.
+    let token = session.token.clone();
     let (events, receiver) = mpsc::channel();
     let (sender, outgoing) = mpsc::channel();
     thread::Builder::new()
@@ -111,7 +109,7 @@ pub fn connect(
                 }
                 delivered
             };
-            let event = match run_websocket(&url, &outgoing, &notify) {
+            let event = match run_websocket(&url, &token, &outgoing, &notify) {
                 Ok(()) => WsEvent::Closed,
                 Err(error) => WsEvent::Error(error),
             };
@@ -121,12 +119,8 @@ pub fn connect(
     Ok((sender, receiver))
 }
 
-fn run_websocket(
-    url: &str,
-    outgoing: &Receiver<String>,
-    notify: &impl Fn(WsEvent) -> bool,
-) -> Result<(), String> {
-    use tungstenite::{http::Uri, stream::MaybeTlsStream, Error, Message};
+fn open_ws_tcp(url: &str) -> Result<TcpStream, String> {
+    use tungstenite::http::Uri;
 
     let uri: Uri = url.parse().map_err(|_| "Некорректный адрес WebSocket")?;
     let host = uri.host().ok_or("В адресе WebSocket нет имени сервера")?;
@@ -152,17 +146,63 @@ fn run_websocket(
     stream
         .set_nodelay(true)
         .map_err(|error| error.to_string())?;
+    Ok(stream)
+}
 
+fn handshake_websocket(
+    url: &str,
+    bearer_token: Option<&str>,
+) -> Result<
+    tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>,
+    (Option<u16>, String),
+> {
+    use tungstenite::{client::IntoClientRequest, Error};
+
+    let stream = open_ws_tcp(url).map_err(|msg| (None, msg))?;
+    let mut request = url
+        .into_client_request()
+        .map_err(|_| (None, "Некорректный адрес WebSocket".to_owned()))?;
+    if let Some(token) = bearer_token {
+        let header = format!("Bearer {token}")
+            .parse()
+            .map_err(|_| (None, "Некорректный токен сессии".to_owned()))?;
+        request
+            .headers_mut()
+            .insert(tungstenite::http::header::AUTHORIZATION, header);
+    }
     // Keep the original URL for the Host header and certificate verification.
-    let (mut socket, _) = tungstenite::client_tls(url, stream).map_err(|error| match error {
-        tungstenite::HandshakeError::Failure(Error::Http(response)) => {
-            format!("Сервер отклонил WebSocket: HTTP {}", response.status())
+    tungstenite::client_tls(request, stream)
+        .map(|(socket, _)| socket)
+        .map_err(|error| match error {
+            tungstenite::HandshakeError::Failure(Error::Http(response)) => (
+                Some(response.status().as_u16()),
+                format!("Сервер отклонил WebSocket: HTTP {}", response.status()),
+            ),
+            tungstenite::HandshakeError::Failure(Error::Io(error)) => (
+                None,
+                format!("Сервер не завершил подключение WebSocket: {error}"),
+            ),
+            _ => (None, "Не удалось завершить рукопожатие WebSocket".into()),
+        })
+}
+
+fn run_websocket(
+    url: &str,
+    token: &str,
+    outgoing: &Receiver<String>,
+    notify: &impl Fn(WsEvent) -> bool,
+) -> Result<(), String> {
+    use tungstenite::{stream::MaybeTlsStream, Error, Message};
+
+    let mut socket = match handshake_websocket(url, Some(token)) {
+        Ok(socket) => socket,
+        // Backwards compatibility with older Workers that only read `?token=`.
+        Err((Some(401), _)) if !token.is_empty() => {
+            let legacy_url = format!("{url}?token={token}");
+            handshake_websocket(&legacy_url, None).map_err(|(_, msg)| msg)?
         }
-        tungstenite::HandshakeError::Failure(Error::Io(error)) => {
-            format!("Сервер не завершил подключение WebSocket: {error}")
-        }
-        _ => "Не удалось завершить рукопожатие WebSocket".into(),
-    })?;
+        Err((_, msg)) => return Err(msg),
+    };
     let tcp = match socket.get_mut() {
         MaybeTlsStream::Plain(tcp) => tcp,
         MaybeTlsStream::Rustls(stream) => &mut stream.sock,
@@ -174,7 +214,14 @@ fn run_websocket(
         return Ok(());
     }
 
+    let mut last_ping = std::time::Instant::now();
     loop {
+        if last_ping.elapsed() >= Duration::from_secs(25) {
+            socket
+                .send(Message::Ping(Vec::new()))
+                .map_err(|error| error.to_string())?;
+            last_ping = std::time::Instant::now();
+        }
         for _ in 0..32 {
             match outgoing.try_recv() {
                 Ok(text) => socket
@@ -192,6 +239,9 @@ fn run_websocket(
                 if !notify(WsEvent::Message(text)) {
                     return Ok(());
                 }
+            }
+            Ok(Message::Ping(payload)) => {
+                let _ = socket.send(Message::Pong(payload));
             }
             Ok(Message::Close(_)) => {
                 let _ = socket.flush();
@@ -319,7 +369,20 @@ mod tests {
             let (tcp, _) = listener.accept().unwrap();
             tcp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
             tcp.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
-            let mut socket = tungstenite::accept(tcp).unwrap();
+            let mut socket = tungstenite::accept_hdr(
+                tcp,
+                |req: &tungstenite::handshake::server::Request,
+                 resp: tungstenite::handshake::server::Response| {
+                    assert_eq!(req.uri().path(), "/api/rooms/TESTROOM/ws");
+                    assert!(req.uri().query().is_none(), "token must not appear in URL");
+                    assert_eq!(
+                        req.headers().get("authorization").and_then(|v| v.to_str().ok()),
+                        Some("Bearer test-token")
+                    );
+                    Ok(resp)
+                },
+            )
+            .unwrap();
             socket
                 .send(tungstenite::Message::Text("initial state".into()))
                 .unwrap();

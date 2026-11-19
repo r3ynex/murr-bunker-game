@@ -4,9 +4,12 @@ import { readBundle, sha256Hex, MAX_ZIP_BYTES } from "./bundle.js";
 import { avatarFrom, publicAvatar } from "./avatars.js";
 import { addInventoryItem, inventoryItems, isInventory, removeInventoryItems, replaceInventory, transferInventory } from "./inventory.js";
 import { healthDegree, setHealthDegree, swapCards } from "./cards.js";
-import { applyHostAction, buildUndo, bunkerSections, hostSnapshot, startGame, undoHostAction } from "./host.js";
+import { applyHostAction, buildUndo, bunkerSections, hostSnapshot, maybeTriggerRoundEvent, resetVote, startGame, undoHostAction } from "./host.js";
 import { publicDiceRoll, rollDice } from "./dice.js";
 import { unzipSync } from "fflate";
+
+export const ROOM_TTL_MS = 10 * 60 * 60 * 1000; // 10 hours (within 8–12h cleanup window)
+const WS_TICKET_TTL_MS = 30 * 1000;
 
 const json = (data, status = 200) => new Response(JSON.stringify(data), {
   status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" }
@@ -18,6 +21,10 @@ const nameFrom = body => {
   const name = body?.name;
   if (typeof name !== "string" || name.trim().length < 2 || name.trim().length > 24) throw Error("Ник: от 2 до 24 символов");
   return name.trim();
+};
+const bearerFrom = request => {
+  const header = request.headers.get("authorization") || "";
+  return header.startsWith("Bearer ") ? header.slice(7) : "";
 };
 
 export default {
@@ -40,7 +47,7 @@ export default {
         }
         return json({ error: "Не удалось создать комнату" }, 503);
       }
-      const match = url.pathname.match(/^\/api\/rooms\/([A-Z2-9]{8})\/(join|ws|bundle|background)$/);
+      const match = url.pathname.match(/^\/api\/rooms\/([A-Z2-9]{8})\/(join|ws|ws-ticket|bundle|background)$/);
       if (!match) return json({ error: "Not found" }, 404);
       const [, code, action] = match;
       const room = env.ROOMS.getByName(code);
@@ -50,6 +57,9 @@ export default {
         return room.fetch("https://room.internal/join", {
           method: "POST", body: JSON.stringify({ name, avatar: avatarFrom(body.avatar) })
         });
+      }
+      if (action === "ws-ticket" && request.method === "POST") {
+        return room.fetch(new Request("https://room.internal/ws-ticket", request));
       }
       if (action === "background" && request.method === "GET") {
         return room.fetch(new Request("https://room.internal/background", request));
@@ -61,8 +71,10 @@ export default {
         if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
           return json({ error: "WebSocket required" }, 426);
         }
-        return room.fetch(new Request("https://room.internal/connect?token=" +
-          encodeURIComponent(url.searchParams.get("token") || ""), request));
+        const params = new URLSearchParams();
+        if (url.searchParams.has("ticket")) params.set("ticket", url.searchParams.get("ticket") || "");
+        if (url.searchParams.has("token")) params.set("token", url.searchParams.get("token") || "");
+        return room.fetch(new Request("https://room.internal/connect?" + params.toString(), request));
       }
       return json({ error: "Method not allowed" }, 405);
     } catch (error) {
@@ -72,6 +84,66 @@ export default {
 };
 
 export class Room extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.wsTickets = new Map();
+  }
+
+  pruneTickets(now = Date.now()) {
+    for (const [key, entry] of this.wsTickets.entries()) {
+      if (entry.expiresAt <= now) this.wsTickets.delete(key);
+    }
+  }
+
+  issueTicket(playerId, now = Date.now()) {
+    this.pruneTickets(now);
+    const ticket = crypto.randomUUID();
+    this.wsTickets.set(ticket, { playerId, expiresAt: now + WS_TICKET_TTL_MS });
+    return ticket;
+  }
+
+  consumeTicket(ticket, now = Date.now()) {
+    this.pruneTickets(now);
+    if (!ticket) return null;
+    const entry = this.wsTickets.get(ticket);
+    if (!entry) return null;
+    this.wsTickets.delete(ticket);
+    return entry.expiresAt > now ? entry.playerId : null;
+  }
+
+  async touchActivity(state, now = Date.now()) {
+    state.lastActivityAt = now;
+    if (typeof this.ctx?.storage?.setAlarm === "function") {
+      await this.ctx.storage.setAlarm(now + ROOM_TTL_MS);
+    }
+  }
+
+  async alarm() {
+    const now = Date.now();
+    const state = await this.ctx.storage.get("room");
+    if (!state) {
+      await this.ctx.storage.deleteAll();
+      return;
+    }
+    const sockets = this.ctx.getWebSockets();
+    const inactiveMs = now - (state.lastActivityAt || 0);
+    if (sockets.length > 0 && state.stage !== "closed") {
+      state.lastActivityAt = now;
+      await this.ctx.storage.put("room", state);
+      await this.ctx.storage.setAlarm(now + ROOM_TTL_MS);
+      return;
+    }
+    if (inactiveMs < ROOM_TTL_MS && state.stage !== "closed") {
+      await this.ctx.storage.setAlarm((state.lastActivityAt || now) + ROOM_TTL_MS);
+      return;
+    }
+    for (const ws of sockets) {
+      try { ws.close(1001, "Room expired"); } catch { /* ignore */ }
+    }
+    this.wsTickets.clear();
+    await this.ctx.storage.deleteAll();
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
     const state = await this.ctx.storage.get("room");
@@ -82,9 +154,11 @@ export class Room extends DurableObject {
       const room = {
         code, hostId: player.id, stage: "lobby", round: 0, seats: 1,
         catastrophe: "", bunker: "", pack: DEFAULT_PACK, players: [player],
-        voteOpen: false, ballots: {}, voteResults: [], bundle: null,
-        eventChance: 0, log: ["Комната создана"]
+        voteOpen: false, voteCandidates: null, ballots: {}, voteResults: [],
+        bundle: null, eventChance: 0, currentEvent: null, eventHistory: [],
+        lastActivityAt: Date.now(), log: ["Комната создана"]
       };
+      await this.touchActivity(room);
       await this.ctx.storage.put("room", room);
       return json({ code, playerId: player.id, token: player.token });
     }
@@ -94,16 +168,31 @@ export class Room extends DurableObject {
       if (state.players.length >= 15) return json({ error: "Комната заполнена" }, 409);
       const { name, avatar } = await request.json();
       const player = this.newPlayer(name, avatar);
-      player.ready = false;
+      const needsHost = !state.players.some(p => p.id === state.hostId);
+      if (needsHost) {
+        state.hostId = player.id;
+        player.ready = true;
+      } else {
+        player.ready = false;
+      }
       state.players.push(player);
-      state.seats = Math.max(1, Math.floor(state.players.length / 2));
+      if (!state.seatsCustom) {
+        state.seats = Math.max(1, Math.floor(state.players.length / 2));
+      }
       this.note(state, name + " присоединился");
+      await this.touchActivity(state);
       await this.ctx.storage.put("room", state);
       await this.broadcast(state);
       return json({ code: state.code, playerId: player.id, token: player.token });
     }
+    if (url.pathname === "/ws-ticket" && request.method === "POST") {
+      const token = bearerFrom(request);
+      const player = state.players.find(p => p.token === token);
+      if (!player) return json({ error: "Неверный токен" }, 401);
+      return json({ ticket: this.issueTicket(player.id) });
+    }
     if (url.pathname === "/background" && request.method === "GET") {
-      const token = (request.headers.get("authorization") || "").replace(/^Bearer /, "");
+      const token = bearerFrom(request);
       if (!state.players.some(p => p.token === token)) return json({ error: "Неверный токен" }, 401);
       if (!state.bundle?.background) return json({ error: "Фон не выбран" }, 404);
       const zip = await this.ctx.storage.get("bundle-data");
@@ -119,8 +208,7 @@ export class Room extends DurableObject {
       });
     }
     if (url.pathname === "/bundle") {
-      const header = request.headers.get("authorization") || "";
-      const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+      const token = bearerFrom(request);
       const me = state.players.find(p => p.token === token);
       if (!me) return json({ error: "Неверный токен" }, 401);
       if (request.method === "GET") {
@@ -151,20 +239,29 @@ export class Room extends DurableObject {
         state.bundle = { sha256: hash, bytes: input.length, background: bundle.background, defaultBackground: bundle.background };
         for (const p of state.players) p.ready = p.id === state.hostId;
         this.note(state, "Выбран ZIP-пак: " + state.pack.name);
+        await this.touchActivity(state);
         await this.ctx.storage.put("room", state);
         await this.broadcast(state);
         return json({ ok: true, bundle: state.bundle, packName: state.pack.name });
       }
     }
     if (url.pathname === "/connect") {
-      const token = url.searchParams.get("token");
-      const player = state.players.find(p => p.token === token);
+      const ticket = url.searchParams.get("ticket");
+      let player = null;
+      if (ticket) {
+        const playerId = this.consumeTicket(ticket);
+        if (playerId) player = state.players.find(p => p.id === playerId) || null;
+      } else {
+        const token = bearerFrom(request) || url.searchParams.get("token");
+        player = state.players.find(p => p.token === token) || null;
+      }
       if (!player) return json({ error: "Неверный токен" }, 401);
+      await this.touchActivity(state);
+      await this.ctx.storage.put("room", state);
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
       this.ctx.acceptWebSocket(server);
       server.serializeAttachment({ playerId: player.id });
-      server.send(JSON.stringify({ type: "state", data: this.view(state, player.id) }));
       await this.broadcast(state);
       return new Response(null, { status: 101, webSocket: client });
     }
@@ -179,11 +276,18 @@ export class Room extends DurableObject {
     state.log = state.log.slice(-40);
   }
   view(state, viewerId) {
+    const hasSecondAbility = state.pack.categories?.ability?.length > 1
+      || state.players.some(p => p.cards.some(c => c.kind === "ability2"));
+    const results = Array.isArray(state.voteResults) ? state.voteResults : [];
+    const voteTied = !state.voteOpen && results.length >= 2 && results[0].votes > 0
+      && results[0].votes === results[1].votes;
     return {
       code: state.code, you: viewerId, hostId: state.hostId, stage: state.stage,
       round: state.round, seats: state.seats, catastrophe: state.catastrophe,
       bunker: state.bunker, packName: state.pack.name, bundle: state.bundle || null,
       eventChance: state.eventChance ?? 0,
+      currentEvent: state.currentEvent || null,
+      eventHistory: state.eventHistory || [],
       canSwapCards: true,
       canSetHealthDegree: true,
       speechEndsAt: state.speechEndsAt ?? 0,
@@ -193,8 +297,15 @@ export class Room extends DurableObject {
         catastrophes: state.pack.catastrophes?.map(entry => entry.title) ?? [],
         bunkerSections: bunkerSections(state),
       } : undefined,
-      categoryLabels: { ...state.pack.categoryLabels, ability2: "Спец. возможность 2" }, voteOpen: state.voteOpen,
-      ballotsCount: Object.keys(state.ballots).length, voteResults: state.voteResults,
+      categoryLabels: {
+        ...state.pack.categoryLabels,
+        ...(hasSecondAbility ? { ability2: "Спец. возможность 2" } : {})
+      },
+      voteOpen: state.voteOpen,
+      voteCandidates: state.voteCandidates || null,
+      voteTied,
+      yourVote: state.voteOpen ? (state.ballots[viewerId] ?? null) : null,
+      ballotsCount: Object.keys(state.ballots).length, voteResults: results,
       log: state.log, connected: this.ctx.getWebSockets().length,
       players: state.players.map(p => ({
         id: p.id, name: p.name, ...publicAvatar(p.avatar),
@@ -207,6 +318,7 @@ export class Room extends DurableObject {
     };
   }
   async broadcast(state) {
+    if (!state) return;
     for (const ws of this.ctx.getWebSockets()) {
       try {
         const id = ws.deserializeAttachment()?.playerId;
@@ -260,6 +372,7 @@ export class Room extends DurableObject {
         const seats = Number(data.seats);
         if (!Number.isInteger(seats) || seats < 1 || seats > 15) throw Error("Недопустимое число мест");
         state.seats = seats;
+        state.seatsCustom = true;
       } else if (data.type === "start") {
         if (state.stage !== "lobby") throw Error("Игра уже запущена");
         if (state.players.length < 2) throw Error("Нужно минимум два игрока (тестовый режим)");
@@ -272,7 +385,9 @@ export class Room extends DurableObject {
         if (!card) throw Error("Карта не найдена");
         if (card.revealed) throw Error("Карта уже открыта");
         card.revealed = true;
-        this.note(state, me.name + " открыл(а): " + data.kind);
+        const label = state.pack.categoryLabels?.[data.kind]
+          || (data.kind === "ability2" ? "Спец. возможность 2" : data.kind);
+        this.note(state, me.name + " открыл(а): " + label);
       } else if (data.type === "host_swap_cards") {
         if (state.stage !== "playing") throw Error("Обмен доступен во время игры");
         swapCards(state, data);
@@ -309,8 +424,15 @@ export class Room extends DurableObject {
           card.revealed = true;
         } else {
           const category = data.kind === "ability2" ? "ability" : data.kind;
-          if (!state.pack.categories[category]) throw Error("Категория не найдена");
-          const fresh = drawCard(state.pack, category);
+          if (!Object.hasOwn(state.pack.categories, category)) throw Error("Категория не найдена");
+          const used = new Set();
+          for (const p of state.players) {
+            for (const c of p.cards) {
+              const cat = c.kind === "ability2" ? "ability" : c.kind;
+              if (cat === category && c.value) used.add(c.value.split("\n", 1)[0]);
+            }
+          }
+          const fresh = drawCard(state.pack, category, used);
           if (isInventory(card.kind)) {
             replaceInventory(state, card, fresh.value, fresh.description);
           } else {
@@ -328,25 +450,55 @@ export class Room extends DurableObject {
         this.note(state, me.name + " бросил(а) d" + sides + ": " + value);
       } else if (data.type === "start_vote") {
         if (state.stage !== "playing") throw Error("Игра ещё не началась");
-        state.voteOpen = true; state.ballots = {}; state.voteResults = [];
-        this.note(state, "Голосование открыто");
+        let candidates = null;
+        if (Array.isArray(data.candidates) && data.candidates.length >= 2) {
+          const unique = [...new Set(data.candidates.filter(id => state.players.some(p => p.id === id && p.active)))];
+          if (unique.length >= 2) candidates = unique;
+        }
+        state.voteOpen = true;
+        state.voteCandidates = candidates;
+        state.ballots = {};
+        state.voteResults = [];
+        if (candidates) {
+          const names = candidates.map(id => state.players.find(p => p.id === id)?.name || "?").join(", ");
+          this.note(state, "Открыто переголосование: " + names);
+        } else {
+          this.note(state, "Голосование открыто");
+        }
       } else if (data.type === "vote") {
         if (!state.voteOpen || !me.active) throw Error("Голосование недоступно");
+        if (data.target === me.id) throw Error("Нельзя голосовать против себя");
         if (!state.players.some(p => p.id === data.target && p.active)) throw Error("Игрок не найден");
+        if (Array.isArray(state.voteCandidates) && !state.voteCandidates.includes(data.target)) {
+          throw Error("Этот игрок не участвует в переголосовании");
+        }
         state.ballots[me.id] = data.target;
       } else if (data.type === "finish_vote") {
         if (!state.voteOpen) throw Error("Голосование уже закрыто");
         state.voteOpen = false;
+        state.voteCandidates = null;
         const tally = {};
         for (const id of Object.values(state.ballots)) tally[id] = (tally[id] || 0) + 1;
         state.voteResults = Object.entries(tally).map(([id, count]) => ({
-          name: state.players.find(p => p.id === id)?.name || "?", votes: count
+          playerId: id,
+          name: state.players.find(p => p.id === id)?.name || "?",
+          votes: count
         })).sort((a, b) => b.votes - a.votes);
-        this.note(state, "Голосование завершено — исключение вручную ведущим");
+        const top = state.voteResults[0];
+        const tied = state.voteResults.length >= 2 && top && state.voteResults[1].votes === top.votes;
+        if (!top) {
+          this.note(state, "Голосование завершено без голосов");
+        } else if (tied) {
+          const tiedNames = state.voteResults.filter(r => r.votes === top.votes).map(r => r.name).join(", ");
+          this.note(state, `Ничья в голосовании (${top.votes} голос.): ${tiedNames}`);
+        } else {
+          this.note(state, `Голосование завершено (лидер: ${top.name} — ${top.votes}) — исключение вручную или кнопкой ведущего`);
+        }
       } else if (data.type === "set_active") {
         const player = state.players.find(p => p.id === data.playerId);
         if (!player || state.stage !== "playing") throw Error("Игрок не найден");
         player.active = Boolean(data.active);
+        if (!player.active && state.voteOpen) delete state.ballots[player.id];
         this.note(state, player.name + (player.active ? " возвращён в лагерь" : " исключён из лагеря"));
       } else if (data.type === "next_round") {
         if (state.stage !== "playing") throw Error("Игра ещё не началась");
@@ -354,8 +506,11 @@ export class Room extends DurableObject {
         if (state.players.filter(p => p.active).length <= state.seats || state.round >= 7) {
           state.stage = "finished"; this.note(state, "Партия завершена");
         } else {
-          state.round += 1; state.voteResults = [];
-          this.note(state, "Раунд " + state.round);
+          state.round += 1;
+          state.voteResults = [];
+          state.voteCandidates = null;
+          const event = maybeTriggerRoundEvent(state);
+          this.note(state, event ? `Раунд ${state.round} · Событие: ${event.title}` : "Раунд " + state.round);
         }
       } else if (data.type === "leave") {
         if (state.stage === "lobby") {
@@ -364,18 +519,25 @@ export class Room extends DurableObject {
             state.hostId = state.players[0].id;
             state.players[0].ready = true;
           }
-          state.seats = Math.max(1, Math.min(state.seats, state.players.length));
+          if (!state.seatsCustom) {
+            state.seats = Math.max(1, Math.floor(state.players.length / 2));
+          } else if (state.players.length) {
+            state.seats = Math.max(1, Math.min(state.seats, 15));
+          }
           this.note(state, me.name + " покинул комнату");
         } else {
           me.active = false;
+          if (state.voteOpen) delete state.ballots[me.id];
           this.note(state, me.name + " покинул партию");
         }
       } else if (data.type === "finish") {
-        state.stage = "finished"; state.voteOpen = false;
+        state.stage = "finished";
+        resetVote(state);
         this.note(state, "Партия завершена ведущим");
       } else {
         throw Error("Неизвестная команда");
       }
+      await this.touchActivity(state);
       let undo = before && buildUndo(before, state);
       const resetUndo = data.type === "host_undo" || (data.type === "host_action"
         && ["close", "transfer_host", "restart"].includes(data.action));
@@ -393,6 +555,7 @@ export class Room extends DurableObject {
     }
   }
   async webSocketClose(ws) {
-    await this.broadcast(await this.ctx.storage.get("room"));
+    const state = await this.ctx.storage.get("room");
+    if (state) await this.broadcast(state);
   }
 }

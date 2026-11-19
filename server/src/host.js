@@ -1,5 +1,5 @@
-import { setCardStage, swapCards } from "./cards.js";
-import { BUNKER_LABELS, drawBunkerSection, drawCard, drawCatastrophe, drawScenario, formatBunker, normalizePack } from "./content.js";
+import { cardHeading, setCardStage, swapCards } from "./cards.js";
+import { BUNKER_LABELS, buildCardFromEntry, drawBunkerSection, drawCard, drawCatastrophe, drawEvent, drawScenario, formatBunker, normalizePack, pickEntry } from "./content.js";
 import { isInventory, replaceInventory } from "./inventory.js";
 
 function applyCatastrophe(state, scenario) {
@@ -10,18 +10,69 @@ function applyCatastrophe(state, scenario) {
   }
 }
 
-function resetVote(state) {
+export function resetVote(state) {
   state.voteOpen = false;
+  state.voteCandidates = null;
   state.ballots = {};
   state.voteResults = [];
+}
+
+function usedHeadlines(state, category) {
+  const used = new Set();
+  for (const player of state.players) {
+    for (const card of player.cards) {
+      const cardCategory = card.kind === "ability2" ? "ability" : card.kind;
+      if (cardCategory === category && card.value) {
+        used.add(card.value.split("\n", 1)[0]);
+      }
+    }
+  }
+  return used;
 }
 
 function deal(state, kind, revealed = false) {
   const category = kind === "ability2" ? "ability" : kind;
   if (!Object.hasOwn(state.pack.categories, category)) throw Error("Категория не найдена");
-  const card = { ...drawCard(state.pack, category), kind, revealed };
+  const card = { ...drawCard(state.pack, category, usedHeadlines(state, category)), kind, revealed };
   if (isInventory(kind)) replaceInventory(state, card, card.value, card.description);
   return card;
+}
+
+function drawFromDeck(decks, pack, category, avoidHeadline = null) {
+  const all = pack.categories[category] ?? [];
+  let deck = decks.get(category);
+  if (!deck || deck.length === 0) {
+    deck = [...all];
+    decks.set(category, deck);
+  }
+  let candidates = avoidHeadline
+    ? deck.filter(entry => cardHeading(entry.title, entry.stage) !== avoidHeadline)
+    : deck;
+  if (candidates.length === 0) {
+    const allFiltered = avoidHeadline
+      ? all.filter(entry => cardHeading(entry.title, entry.stage) !== avoidHeadline)
+      : all;
+    candidates = allFiltered.length > 0 ? allFiltered : deck;
+  }
+  const entry = pickEntry(candidates);
+  const idx = deck.indexOf(entry);
+  if (idx >= 0) deck.splice(idx, 1);
+  return entry;
+}
+
+export function maybeTriggerRoundEvent(state, force = false) {
+  const chance = Number(state.eventChance ?? 0);
+  if (!force) {
+    if (chance <= 0) return null;
+    const roll = (crypto.getRandomValues(new Uint32Array(1))[0] / 4294967296) * 100;
+    if (roll >= chance) return null;
+  }
+  const history = Array.isArray(state.eventHistory) ? state.eventHistory : [];
+  const drawn = drawEvent(state.pack, history.map(e => e.title));
+  const event = { round: state.round, title: drawn.title, description: drawn.description };
+  state.currentEvent = event;
+  state.eventHistory = [...history, event].slice(-20);
+  return event;
 }
 
 export function startGame(state) {
@@ -37,11 +88,24 @@ export function startGame(state) {
   state.round = 1;
   state.speechEndsAt = 0;
   state.diceRoll = null;
+  state.currentEvent = null;
+  state.eventHistory = [];
   resetVote(state);
+  const decks = new Map();
   for (const player of state.players) {
     player.active = true;
-    player.cards = state.pack.categoryOrder.map(kind => deal(state, kind));
-    if (state.pack.categories.ability?.length > 1) player.cards.push(deal(state, "ability2"));
+    player.cards = state.pack.categoryOrder.map(kind => {
+      const entry = drawFromDeck(decks, state.pack, kind);
+      const card = buildCardFromEntry(entry, kind);
+      if (isInventory(kind)) replaceInventory(state, card, card.value, card.description);
+      return card;
+    });
+    if (state.pack.categories.ability?.length > 1) {
+      const firstAbility = player.cards.find(card => card.kind === "ability");
+      const firstHeadline = firstAbility?.value.split("\n", 1)[0] ?? null;
+      const entry = drawFromDeck(decks, state.pack, "ability", firstHeadline);
+      player.cards.push({ ...buildCardFromEntry(entry, "ability"), kind: "ability2", revealed: false });
+    }
   }
 }
 
@@ -99,7 +163,7 @@ function effect(card, action, value) {
     if (headline !== value) card.value = [value, ...tail].join("\n");
   }
   if (action === "childfree") {
-    if (!card.value.split("\n").includes("Чайлдфри")) {
+    if (!/чайлдфри/iu.test(card.value)) {
       const suffix = card.description ? "\n" + card.description : "";
       const description = card.value.endsWith(suffix) ? suffix : "";
       const end = card.value.length - description.length;
@@ -142,10 +206,61 @@ export function applyHostAction(state, data, now = Date.now()) {
       if (!Number.isInteger(data.seats) || data.seats < 1 || data.seats > 15) throw Error("Мест в бункере должно быть от 1 до 15");
       state.seats = data.seats;
       return "Мест в бункере: " + state.seats;
-    case "skip_vote":
+    case "skip_vote": {
       resetVote(state);
       state.round += 1;
-      return "Круг завершён без изгнания · раунд " + state.round;
+      const event = maybeTriggerRoundEvent(state);
+      return event
+        ? `Круг завершён без изгнания · раунд ${state.round} · Событие: ${event.title}`
+        : "Круг завершён без изгнания · раунд " + state.round;
+    }
+    case "trigger_event": {
+      if (data.title !== undefined) {
+        const title = text(data.title, 240);
+        if (!title) throw Error("Укажи название события");
+        const description = data.description === undefined ? "" : text(data.description, 2000);
+        const event = { round: state.round, title, description };
+        state.currentEvent = event;
+        state.eventHistory = [...(state.eventHistory ?? []), event].slice(-20);
+        return "Событие раунда " + state.round + ": " + event.title;
+      }
+      const event = maybeTriggerRoundEvent(state, true);
+      return "Событие раунда " + state.round + ": " + event.title;
+    }
+    case "clear_event":
+      state.currentEvent = null;
+      return "Текущее событие скрыто";
+    case "runoff_vote": {
+      if (state.voteOpen) throw Error("Сначала закрой текущее голосование");
+      const results = Array.isArray(state.voteResults) ? state.voteResults : [];
+      if (results.length < 2 || !results[0].votes) throw Error("Нет ничьей для переголосования");
+      const topVotes = results[0].votes;
+      const tied = results
+        .filter(r => r.votes === topVotes && r.playerId)
+        .map(r => r.playerId)
+        .filter(id => state.players.some(p => p.id === id && p.active));
+      if (tied.length < 2) throw Error("Для переголосования нужны минимум два активных лидера");
+      state.voteOpen = true;
+      state.voteCandidates = tied;
+      state.ballots = {};
+      state.voteResults = [];
+      const names = tied.map(id => state.players.find(p => p.id === id)?.name || "?").join(", ");
+      return "Открыто переголосование среди лидеров: " + names;
+    }
+    case "exclude_vote_leader": {
+      if (state.voteOpen) throw Error("Сначала закрой голосование");
+      const results = Array.isArray(state.voteResults) ? state.voteResults : [];
+      if (results.length === 0 || !results[0].votes) throw Error("Нет итогов голосования");
+      if (results.length >= 2 && results[0].votes === results[1].votes) {
+        throw Error("Ничья по голосам — проведи переголосование или выбери вручную");
+      }
+      const leaderId = results[0].playerId;
+      const leader = state.players.find(p => p.id === leaderId);
+      if (!leader || !leader.active) throw Error("Лидер голосования уже выбыл");
+      leader.active = false;
+      state.voteCandidates = null;
+      return `${leader.name} исключён(а) по итогам голосования (${results[0].votes} голос.)`;
+    }
     case "catastrophe":
       if (data.index !== undefined && (!Number.isInteger(data.index) || data.index < 0)) throw Error("Неверный выбор катаклизма");
       applyCatastrophe(state, drawCatastrophe(state.pack, data.index));
@@ -189,8 +304,9 @@ export function applyHostAction(state, data, now = Date.now()) {
       if (source === target) throw Error("Выбери двух разных игроков");
       const sourceIndex = cardSlot(source, kind);
       const targetIndex = cardSlot(target, kind);
-      target.cards[targetIndex] = source.cards[sourceIndex];
-      source.cards[sourceIndex] = { kind, value: "Нет характеристики", revealed: false, description: "",
+      const taken = source.cards[sourceIndex];
+      target.cards[targetIndex] = taken;
+      source.cards[sourceIndex] = { kind, value: "Нет характеристики", revealed: taken.revealed, description: "",
         ...(isInventory(kind) && { items: [] }) };
       return "Ведущий переместил карточку между игроками";
     }
@@ -246,7 +362,8 @@ export function applyHostAction(state, data, now = Date.now()) {
 }
 
 const UNDO_FIELDS = ["stage", "round", "seats", "catastrophe", "bunker", "bunkerSections",
-  "bundle", "voteOpen", "ballots", "voteResults", "speechEndsAt"];
+  "bundle", "voteOpen", "voteCandidates", "ballots", "voteResults", "speechEndsAt",
+  "currentEvent", "eventHistory"];
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 export function hostSnapshot(state) {

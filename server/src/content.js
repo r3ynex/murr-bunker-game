@@ -31,6 +31,16 @@ const DEFAULT_INPUT = {
     "Подземная библиотека, 90 м². Запас воды на год, есть небольшая теплица.",
     "Старое убежище, 145 м². Хорошая вентиляция, но мало инструментов."
   ],
+  events: [
+    { title: "Сбой генератора", description: "Энергоснабжение бункера перешло на резервные батареи. В этом раунде особенно ценятся технические навыки и инвентарь." },
+    { title: "Сигнал с поверхности", description: "Радиоприёмник поймал слабую передачу о группе выживших неподалёку. Обсудите, стоит ли отвечать." },
+    { title: "Утечка в системе фильтрации", description: "Запас питьевой воды под угрозой. Нужны специалисты или инструменты для срочного ремонта." },
+    { title: "Найден запечатанный тайник", description: "В техническом отсеке обнаружен старый контейнер. Ведущий может выдать предмет одному из игроков." },
+    { title: "Медицинский осмотр", description: "В лагере вспыхнули подозрения о скрытых болезнях. В этом раунде игрокам стоит уделить внимание здоровью." },
+    { title: "Шум у внешнего шлюза", description: "Датчики движения сработали на входе в убежище. Кто сможет защитить бункер или оценить угрозу?" },
+    { title: "Психологическое напряжение", description: "Затяжное ожидание накаляет обстановку. Черты характера и хобби сейчас важнее, чем кажется." },
+    { title: "Ревизия припасов", description: "Часть пайков оказалась испорчена. Обсудите, кто поможет восполнить или сэкономить ресурсы." }
+  ],
   categories: {
     gender: ["Женщина, 27 лет", "Мужчина, 34 года", "Женщина, 42 года", "Мужчина, 23 года"],
     body: ["Высокий и выносливый", "Невысокий и подвижный", "Средний рост, хорошая координация", "Крепкое телосложение"],
@@ -165,6 +175,7 @@ const GROUP_FIELDS = [...Object.keys(PACK_GROUPS), "customCategories", "meta", "
 function groupedToFlat(input) {
   if (input.categories !== undefined || input.catastrophes !== undefined ||
       input.bunker !== undefined || input.bunkers !== undefined ||
+      input.events !== undefined ||
       input.name !== undefined || input.id !== undefined || input.description !== undefined) {
     throw Error("Не смешивай секции v2 с устаревшими полями categories/catastrophes/name");
   }
@@ -195,11 +206,12 @@ function groupedToFlat(input) {
     if (!["id", "name", "description"].includes(key)) throw Error("meta: неизвестное поле " + key);
   }
   for (const key of Object.keys(world)) {
-    if (!["catastrophes", "bunker"].includes(key)) throw Error("world: неизвестное поле " + key);
+    if (!["catastrophes", "bunker", "events"].includes(key)) throw Error("world: неизвестное поле " + key);
   }
   return {
     formatVersion: 2, ...meta, categories,
-    catastrophes: world.catastrophes, bunker: world.bunker
+    catastrophes: world.catastrophes, bunker: world.bunker,
+    ...(world.events !== undefined && { events: world.events })
   };
 }
 // Used by the importer to export a ready-to-edit SINGLE document.
@@ -209,7 +221,7 @@ export function organizePack(source) {
     formatVersion: 2,
     meta: { id: pack.id, name: pack.name, description: pack.description },
     roles: {}, characteristics: {}, items: {},
-    world: { catastrophes: pack.catastrophes, bunker: pack.bunker }
+    world: { catastrophes: pack.catastrophes, bunker: pack.bunker, events: pack.events }
   };
   for (const [group, names] of Object.entries(PACK_GROUPS)) {
     for (const key of names) {
@@ -279,13 +291,14 @@ export function normalizePack(source) {
     if (!(key in BUNKER_LABELS)) throw Error("Неизвестная секция бункера: " + key);
     bunker[key] = cleanEntries(values, "Бункер: " + key, 200);
   }
+  const events = cleanEntries(input.events ?? DEFAULT_INPUT.events, "События", 200);
   return {
     formatVersion: 2,
     id: field(input.id, "id", 80) || "custom",
     name: field(input.name, "name", 80) || "Без названия",
     description: field(input.description, "description", 800) || "",
     categories, categoryLabels, categoryOrder: Object.keys(categories),
-    catastrophes, bunker
+    catastrophes, bunker, events
   };
 }
 export const DEFAULT_PACK = normalizePack(DEFAULT_INPUT);
@@ -303,22 +316,50 @@ export function pickEntry(entries) {
 function randomInt(a, b) {
   return a + Math.floor(randomFraction() * (b - a + 1));
 }
+export function formatAge(years) {
+  const n = Math.abs(Math.trunc(years));
+  const mod100 = n % 100;
+  const mod10 = n % 10;
+  if (mod100 >= 11 && mod100 <= 14) return `${years} лет`;
+  if (mod10 === 1) return `${years} год`;
+  if (mod10 >= 2 && mod10 <= 4) return `${years} года`;
+  return `${years} лет`;
+}
 function formatted(entry) {
   return entry.title + (entry.description ? "\n" + entry.description : "");
 }
-export function drawCard(pack, kind) {
-  const entry = pickEntry(pack.categories[kind]);
+export function buildCardFromEntry(entry, kind) {
   const details = [];
   if (kind === "gender" && entry.age1 !== undefined) {
-    details.push(randomInt(entry.age1, entry.age2) + " лет");
+    details.push(formatAge(randomInt(entry.age1, entry.age2)));
   }
   if (kind === "body" && entry.height1 !== undefined) {
     details.push(randomInt(entry.height1, entry.height2) + " см");
   }
   const title = cardHeading(entry.title, entry.stage);
-  return { kind, value: [title, ...details, entry.description].filter(Boolean).join("\n"),
-    revealed: false, description: entry.description ?? "",
-    ...(["health", "profession"].includes(kind) && { [kind]: { title: entry.title, degree: entry.stage ?? "" } }) };
+  return {
+    kind,
+    value: [title, ...details, entry.description].filter(Boolean).join("\n"),
+    revealed: false,
+    description: entry.description ?? "",
+    ...(["health", "profession"].includes(kind) && { [kind]: { title: entry.title, degree: entry.stage ?? "" } })
+  };
+}
+export function drawCard(pack, kind, excludeHeadlines = null) {
+  const entries = pack.categories[kind];
+  let pool = entries;
+  if (excludeHeadlines && excludeHeadlines.size > 0) {
+    const unused = entries.filter(entry => !excludeHeadlines.has(cardHeading(entry.title, entry.stage)));
+    if (unused.length > 0) pool = unused;
+  }
+  return buildCardFromEntry(pickEntry(pool), kind);
+}
+export function drawEvent(pack, usedTitles = []) {
+  const events = Array.isArray(pack.events) && pack.events.length ? pack.events : DEFAULT_PACK.events;
+  const used = new Set(usedTitles);
+  const unused = events.filter(entry => !used.has(entry.title));
+  const selected = pickEntry(unused.length > 0 ? unused : events);
+  return { title: selected.title, description: selected.description ?? "" };
 }
 export function drawCatastrophe(pack, index) {
   const selected = index === undefined ? pickEntry(pack.catastrophes) : pack.catastrophes[index];

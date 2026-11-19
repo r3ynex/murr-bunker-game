@@ -1,4 +1,4 @@
-use crate::model::{category_name, AvatarId, Card, LocalConfig, Room, Session};
+use crate::model::{category_name, AvatarId, Card, LocalConfig, Room, SavedSession, Session};
 use crate::appearance::{portable_path, with_icon, FontWeight, Layout, Theme};
 use crate::artwork::{centered_row, flat_button, input_row, paint_contain, paint_cover, paint_gradient, table_cell, Artwork, Icon, TABLE_CELL_PADDING};
 use crate::avatars::Avatars;
@@ -129,6 +129,7 @@ pub struct BunkerApp {
     screen_transition: Option<(Screen, f64)>,
     join_code: String,
     session: Option<Session>,
+    saved_session: Option<SavedSession>,
     room: Option<Room>,
     pending: Option<Receiver<Result<Session, String>>>,
     sender: Option<WsSender>,
@@ -143,6 +144,8 @@ pub struct BunkerApp {
     show_host_tools: bool,
     host_panel: HostPanel,
     show_survivability: bool,
+    confirm_leave: bool,
+    pending_vote_jump: bool,
     editor: Option<(String, String)>,
     editor_value: String,
     editor_health_degree: String,
@@ -175,6 +178,9 @@ impl BunkerApp {
             "" | "http://127.0.0.1:8787" | "http://localhost:8787") {
             config.server_url = LocalConfig::default().server_url;
         }
+        let saved_session = fs::read_to_string(portable_path("murr-session.json")).ok()
+            .and_then(|s| serde_json::from_str::<SavedSession>(&s).ok())
+            .filter(|saved| !saved.session.code.trim().is_empty() && !saved.session.token.trim().is_empty());
         let profile_ready = !config.nickname.trim().is_empty();
         Self {
             theme,
@@ -190,10 +196,11 @@ impl BunkerApp {
             avatar: if profile_ready { Some(config.avatar) } else { None },
             avatars: Avatars::discover(),
             profile_ready, screen_transition: None, join_code: String::new(),
-            session: None, room: None, pending: None, sender: None, receiver: None, room_deadline: None, online: false,
+            session: None, saved_session, room: None, pending: None, sender: None, receiver: None, room_deadline: None, online: false,
             create_on_connect: false,
             show_avatar_picker: false, show_join: false, show_create: false,
             show_settings: false, show_host_tools: false, host_panel: HostPanel::default(), show_survivability: false,
+            confirm_leave: false, pending_vote_jump: false,
             editor: None, editor_value: String::new(), editor_health_degree: String::new(),
             transfer_ids: String::new(), transfer_target: None,
             pending_section: None, active_section: 0,
@@ -312,11 +319,26 @@ impl BunkerApp {
             self.avatar.unwrap_or(1), join
         ));
     }
+    fn persist_session(&mut self, session: &Session) {
+        let saved = SavedSession {
+            server_url: self.server_url.trim().trim_end_matches('/').to_owned(),
+            session: session.clone(),
+        };
+        if let Ok(text) = serde_json::to_string_pretty(&saved) {
+            let _ = fs::write(portable_path("murr-session.json"), text);
+        }
+        self.saved_session = Some(saved);
+    }
+    fn clear_saved_session(&mut self) {
+        self.saved_session = None;
+        let _ = fs::remove_file(portable_path("murr-session.json"));
+    }
     fn connect_session(&mut self, ctx: &egui::Context, session: Session) {
         let ctx = ctx.clone();
         match network::connect(&self.server_url, &session, move || ctx.request_repaint()) {
             Ok((sender, receiver)) => {
                 self.notify(format!("Подключаемся к комнате {}…", session.code));
+                self.persist_session(&session);
                 self.session = Some(session);
                 self.sender = Some(sender);
                 self.receiver = Some(receiver);
@@ -441,7 +463,13 @@ impl BunkerApp {
                 }
                 WsEvent::Error(e) => {
                     self.stop_websocket();
-                    self.notify(format!("Связь: {e}"));
+                    if self.room.is_none() && (e.contains("HTTP 401") || e.contains("HTTP 404")) {
+                        self.clear_saved_session();
+                        self.session = None;
+                        self.notify("Комната больше недоступна — сохранённая сессия сброшена");
+                    } else {
+                        self.notify(format!("Связь: {e}"));
+                    }
                 }
                 WsEvent::Message(text) => {
                     if let Ok(message) = serde_json::from_str::<Value>(&text) {
@@ -475,6 +503,9 @@ impl BunkerApp {
     }
     fn update_room(&mut self, room: Room) {
         self.dice.sync(room.dice_roll.as_ref());
+        if room.stage == "closed" {
+            self.clear_saved_session();
+        }
         let joined = self.room.as_ref()
             .filter(|previous| previous.code == room.code && room.stage == "lobby")
             .and_then(|previous| room.players.iter().find(|player| {
@@ -497,10 +528,13 @@ impl BunkerApp {
     fn leave_room(&mut self) {
         if self.online { self.send(json!({"type":"leave"})); }
         self.stop_websocket();
+        self.clear_saved_session();
         self.room = None;
         self.dice.sync(None);
         self.show_host_tools = false;
         self.host_panel = HostPanel::default();
+        self.confirm_leave = false;
+        self.pending_vote_jump = false;
         self.editor = None;
         self.clear_background();
         self.session = None;
@@ -599,20 +633,105 @@ impl BunkerApp {
                 self.show_settings = true;
             }
         });
+        if let Some(saved) = self.saved_session.clone() {
+            ui.add_space(22.0);
+            let card_w = (3.0 * width + 2.0 * gap).min(520.0);
+            let mut reconnect = false;
+            let mut forget = false;
+            ui.vertical_centered(|ui| {
+                ui.allocate_ui_with_layout(egui::vec2(card_w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_width(card_w);
+                    egui::Frame::new()
+                        .fill(self.theme.palette.panel.color())
+                        .stroke(Stroke::new(1.0_f32, self.theme.palette.outline.color()))
+                        .corner_radius(6u8)
+                        .inner_margin(egui::Margin::symmetric(14, 10))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    FontWeight::SemiBold
+                                        .text(self.theme.fonts.body, format!("Последняя комната: {}", saved.session.code))
+                                        .color(self.theme.palette.accent_title.color()),
+                                );
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.add(animated_button(egui::Button::new("Сбросить"))).clicked() {
+                                        forget = true;
+                                    }
+                                    if ui.add_enabled(
+                                        self.pending.is_none() && self.room_deadline.is_none(),
+                                        animated_button(self.theme.accent_button("Вернуться в комнату")),
+                                    ).clicked() {
+                                        reconnect = true;
+                                    }
+                                });
+                            });
+                        });
+                });
+            });
+            if reconnect {
+                if !saved.server_url.trim().is_empty() {
+                    self.server_url = saved.server_url;
+                }
+                self.create_on_connect = false;
+                self.connect_session(ui.ctx(), saved.session);
+            } else if forget {
+                self.clear_saved_session();
+                self.notify("Сохранённая сессия сброшена");
+            }
+        }
     }
 
     fn ui_lobby(&mut self, ui: &mut egui::Ui, room: &Room) {
         let host = room.you == room.host_id;
         let height = ui.available_height();
-        ui.add_space(0.10 * height);
+        ui.add_space(0.08 * height);
         ui.vertical_centered(|ui| {
-            ui.label(FontWeight::Bold.text(self.theme.fonts.lobby_heading, format!("Лобби: {}", room.code)));
-            ui.label(FontWeight::Medium.text(self.theme.fonts.lobby_count, format!("Игроки: {} из 15", room.players.len()))).on_hover_text(&room.pack_name);
+            let code_label = format!("Лобби: {}", room.code);
+            let copy_text = "Копировать код";
+            let heading_font = FontWeight::Bold.font(self.theme.fonts.lobby_heading);
+            let title_w = ui.painter().layout_no_wrap(code_label.clone(), heading_font, Color32::WHITE).size().x;
+            let copy_w = 148.0;
+            let gap = 12.0;
+            centered_row(ui, (title_w + copy_w + gap).min(ui.available_width()), 38.0, |ui| {
+                ui.label(FontWeight::Bold.text(self.theme.fonts.lobby_heading, code_label));
+                let copy_btn = egui::Button::new(
+                    FontWeight::SemiBold.text(self.theme.fonts.small + 1.0, copy_text)
+                        .color(self.theme.palette.accent_title.color())
+                )
+                .fill(self.theme.palette.panel.color())
+                .stroke(Stroke::new(1.0_f32, self.theme.palette.outline.color()))
+                .corner_radius(4u8);
+                if ui.add_sized([copy_w, 30.0], animated_button(copy_btn))
+                    .on_hover_text("Скопировать код комнаты в буфер обмена")
+                    .clicked()
+                {
+                    ui.ctx().copy_text(room.code.clone());
+                    self.notify(format!("Код комнаты скопирован: {}", room.code));
+                }
+            });
+            ui.add_space(4.0);
+            ui.label(
+                FontWeight::Medium.text(
+                    self.theme.fonts.lobby_count,
+                    format!(
+                        "Игроки: {} из 15  ·  Мест в бункере: {}  ·  В сети: {}",
+                        room.players.len(),
+                        room.seats,
+                        room.connected
+                    ),
+                ),
+            );
+            ui.label(
+                FontWeight::Regular
+                    .text(self.theme.fonts.small + 1.0, format!("Пак: {}", room.pack_name))
+                    .color(self.theme.palette.muted.color()),
+            );
         });
-        ui.add_space(14.0);
+        ui.add_space(16.0);
 
         let [action_width, action_height] = self.theme.buttons.menu_size;
-        let roster_height = (ui.available_height() - action_height - 38.0).max(75.0);
+        let roster_height = (ui.available_height() - action_height - 44.0).max(75.0);
         let columns = self.layout.lobby_columns;
         let side = self.layout.lobby_avatar_size;
         let roster_width = ui.available_width() * 0.82;
@@ -624,29 +743,73 @@ impl BunkerApp {
                         for (index, player) in room.players.iter().enumerate() {
                             let column = &mut cols[index % columns];
                             let player_is_host = player.id == room.host_id;
+                            let is_you = player.id == room.you;
                             let ready = player.ready || player_is_host;
-                            column.horizontal(|ui| {
-                                ui.vertical(|ui| {
-                                    ui.set_height(28.0);
-                                    if player_is_host {
-                                        ui.horizontal(|ui| {
-                                            ui.add_space(side * 0.30);
-                                            if let Some(icon) = self.artwork.icon(Icon::Host, 26.0) {
-                                                ui.add(icon).on_hover_text("Ведущий");
+                            let status_color = if ready {
+                                self.theme.palette.positive.color()
+                            } else {
+                                self.theme.palette.negative.color()
+                            };
+                            let border_color = if is_you {
+                                self.theme.palette.outline.color()
+                            } else {
+                                self.theme.palette.button.color().gamma_multiply(0.55)
+                            };
+                            egui::Frame::new()
+                                .fill(self.theme.palette.surface.color())
+                                .stroke(Stroke::new(1.0_f32, border_color))
+                                .corner_radius(4u8)
+                                .inner_margin(egui::Margin::symmetric(10, 8))
+                                .show(column, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.horizontal(|ui| {
+                                        let (bar, _) = ui.allocate_exact_size(egui::vec2(4.0, side), egui::Sense::hover());
+                                        ui.painter().rect_filled(bar, 2u8, status_color);
+                                        self.avatar_widget(ui, player.avatar(), is_you, side);
+                                        ui.vertical(|ui| {
+                                            ui.horizontal(|ui| {
+                                                if player_is_host {
+                                                    if let Some(icon) = self.artwork.icon(Icon::Host, 18.0) {
+                                                        ui.add(icon).on_hover_text("Ведущий");
+                                                    } else {
+                                                        ui.label(
+                                                            RichText::new(&self.theme.icons.host)
+                                                                .color(self.theme.palette.accent_title.color()),
+                                                        )
+                                                        .on_hover_text("Ведущий");
+                                                    }
+                                                }
+                                                ui.add(
+                                                    egui::Label::new(FontWeight::Bold.text(
+                                                        self.theme.fonts.lobby_name,
+                                                        &player.name,
+                                                    ))
+                                                    .truncate(),
+                                                )
+                                                .on_hover_text(&player.name);
+                                            });
+                                            let subtitle = if player_is_host {
+                                                if is_you { "Ведущий · Вы" } else { "Ведущий" }
+                                            } else if ready {
+                                                if is_you { "Готов · Вы" } else { "Готов" }
+                                            } else if is_you {
+                                                "Не готов · Вы"
                                             } else {
-                                                ui.label(RichText::new(&self.theme.icons.host).color(self.theme.palette.accent.color())).on_hover_text("Ведущий");
-                                            }
+                                                "Ожидание"
+                                            };
+                                            ui.label(
+                                                FontWeight::Medium
+                                                    .text(self.theme.fonts.small + 1.0, subtitle)
+                                                    .color(if player_is_host {
+                                                        self.theme.palette.accent_title.color()
+                                                    } else {
+                                                        status_color
+                                                    }),
+                                            );
                                         });
-                                    }
+                                    });
                                 });
-                            });
-                            column.horizontal(|ui| {
-                                let color = if ready { self.theme.palette.positive.color() } else { self.theme.palette.negative.color() };
-                                let (bar, _) = ui.allocate_exact_size(egui::vec2(4.0, side), egui::Sense::hover());
-                                ui.painter().rect_filled(bar, 0u8, color);
-                                self.avatar_widget(ui, player.avatar(), false, side);
-                                ui.add(egui::Label::new(FontWeight::Bold.text(self.theme.fonts.lobby_name, &player.name)).truncate());
-                            });
+                            column.add_space(6.0);
                         }
                     });
                 });
@@ -737,46 +900,119 @@ impl BunkerApp {
     fn game_navigation(&mut self, ctx: &egui::Context) {
         let sections = ["Катаклизм", "Бункер", "События", "Досье", "Игроки", "Спецвозможности"];
         egui::Area::new(egui::Id::new("game-section-nav"))
-            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -54.0))
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -24.0))
             .order(egui::Order::Foreground).movable(false).show(ctx, |ui| {
-                egui::Frame::new().fill(self.theme.palette.background.color()).inner_margin(8).show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    ui.horizontal(|ui| {
-                        for (index, (label, icon)) in sections.into_iter().zip(Icon::NAVIGATION).enumerate() {
-                            let fallback = &self.theme.icons.navigation[index];
-                            let button = self.artwork.button(icon, if fallback.is_empty() { label } else { fallback }, self.theme.fonts.icon);
-                            let colors = if index == self.active_section {
-                                self.theme.accent_gradient()
-                            } else {
-                                [self.theme.palette.button.color(); 2]
-                            };
-                            if flat_button(ui, self.theme.buttons.navigation_size, button, colors, self.theme.buttons.radius)
-                                .on_hover_text(label).clicked()
-                            {
-                                self.pending_section = Some(index);
-                                ctx.request_repaint();
+                egui::Frame::new()
+                    .fill(self.theme.palette.panel.color().gamma_multiply(0.95))
+                    .stroke(Stroke::new(1.0_f32, self.theme.palette.outline.color()))
+                    .corner_radius(6u8)
+                    .inner_margin(egui::Margin::symmetric(10, 7))
+                    .show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.horizontal(|ui| {
+                            for (index, (label, icon)) in sections.into_iter().zip(Icon::NAVIGATION).enumerate() {
+                                let fallback = &self.theme.icons.navigation[index];
+                                let button = self.artwork.button(icon, if fallback.is_empty() { label } else { fallback }, self.theme.fonts.icon);
+                                let colors = if index == self.active_section {
+                                    self.theme.accent_gradient()
+                                } else {
+                                    [self.theme.palette.button.color(); 2]
+                                };
+                                if flat_button(ui, self.theme.buttons.navigation_size, button, colors, self.theme.buttons.radius)
+                                    .on_hover_text(label).clicked()
+                                {
+                                    self.pending_section = Some(index);
+                                    ctx.request_repaint();
+                                }
                             }
-                        }
+                            ui.add_space(4.0);
+                            let current = sections.get(self.active_section).copied().unwrap_or("");
+                            ui.label(
+                                FontWeight::SemiBold
+                                    .text(self.theme.fonts.small + 1.0, current)
+                                    .color(self.theme.palette.accent_title.color()),
+                            );
+                        });
                     });
-                });
             });
     }
 
     fn host_overlay(&mut self, ctx: &egui::Context, room: &Room) {
+        let mut top_offset = 14.0;
+        if !self.online && self.room_deadline.is_none() {
+            if let Some(session) = self.session.clone() {
+                egui::Area::new(egui::Id::new("reconnect-banner"))
+                    .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, top_offset))
+                    .order(egui::Order::Foreground).movable(false).show(ctx, |ui| {
+                        egui::Frame::new()
+                            .fill(self.theme.palette.panel.color())
+                            .stroke(Stroke::new(1.0_f32, self.theme.palette.negative.color()))
+                            .corner_radius(6u8)
+                            .inner_margin(egui::Margin::symmetric(12, 8))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        FontWeight::SemiBold
+                                            .text(self.theme.fonts.small + 1.0, "Нет соединения с комнатой")
+                                            .color(self.theme.palette.negative.color()),
+                                    );
+                                    if ui.add(animated_button(self.theme.accent_button("Переподключиться"))).clicked() {
+                                        self.connect_session(ctx, session);
+                                    }
+                                });
+                            });
+                    });
+                top_offset += 54.0;
+            }
+        }
         if room.speech_ends_at != 0 && room.stage == "playing" {
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
             let remaining = room.speech_ends_at.saturating_sub(now);
             let seconds = remaining.div_ceil(1000);
             egui::Area::new(egui::Id::new("speech-timer"))
-                .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 14.0))
+                .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, top_offset))
                 .order(egui::Order::Foreground).movable(false).interactable(false).show(ctx, |ui| {
-                    egui::Frame::new().fill(self.theme.palette.panel.color()).inner_margin(8)
-                        .stroke(Stroke::new(1.0_f32, self.theme.palette.outline.color())).show(ui, |ui| {
+                    egui::Frame::new()
+                        .fill(self.theme.palette.panel.color())
+                        .corner_radius(6u8)
+                        .inner_margin(egui::Margin::symmetric(12, 7))
+                        .stroke(Stroke::new(1.0_f32, if seconds <= 5 { self.theme.palette.negative.color() } else { self.theme.palette.outline.color() }))
+                        .show(ui, |ui| {
                             let caption = if seconds == 0 { "Время вышло".into() } else { format!("Обсуждение · {seconds} сек.") };
                             ui.label(FontWeight::Bold.text(self.theme.fonts.button, caption));
                         });
                 });
+            top_offset += 46.0;
             if remaining != 0 { ctx.request_repaint_after(Duration::from_millis((remaining - 1) % 1000 + 1)); }
+        }
+        if room.vote_open && room.stage == "playing" {
+            egui::Area::new(egui::Id::new("vote-alert-banner"))
+                .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, top_offset))
+                .order(egui::Order::Foreground).movable(false).show(ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(self.theme.palette.panel.color())
+                        .stroke(Stroke::new(1.0_f32, self.theme.palette.accent.color()))
+                        .corner_radius(6u8)
+                        .inner_margin(egui::Margin::symmetric(12, 7))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let status = if room.your_vote.is_some() {
+                                    format!("Голосование · ваш голос учтён ({} всего)", room.ballots_count)
+                                } else {
+                                    format!("Идёт голосование · голосов: {}", room.ballots_count)
+                                };
+                                ui.label(
+                                    FontWeight::SemiBold
+                                        .text(self.theme.fonts.small + 2.0, status)
+                                        .color(self.theme.palette.accent_title.color()),
+                                );
+                                if ui.add(animated_button(egui::Button::new("К голосованию"))).clicked() {
+                                    self.pending_vote_jump = true;
+                                    ctx.request_repaint();
+                                }
+                            });
+                        });
+                });
         }
         if room.you == room.host_id && matches!(room.stage.as_str(), "playing" | "finished") {
             egui::Area::new(egui::Id::new("host-panel-toggle"))
@@ -848,12 +1084,111 @@ impl BunkerApp {
 
     fn event_section(&mut self, ui: &mut egui::Ui, room: &Room) {
         let top = ui.cursor().top();
+        let is_host = room.you == room.host_id;
+        let has_controls = self.online && room.host_controls.is_some();
         ui.add_space(36.0);
         heading(ui, &self.theme, "События");
+        let width = game_body_width(ui.available_width()).min(780.0);
         ui.vertical_centered(|ui| {
-            ui.label(FontWeight::Bold.text(self.theme.fonts.heading, "UNDER CONSTRUCTION").color(self.theme.palette.negative.color()));
-            ui.label(RichText::new(format!("Шанс события: {}% · Реальные события пока не запускаются",
-                room.event_chance)).color(self.theme.palette.muted.color()));
+            ui.allocate_ui_with_layout(egui::vec2(width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.set_width(width);
+                let border = if room.current_event.is_some() {
+                    self.theme.palette.accent.color()
+                } else {
+                    self.theme.palette.outline.color()
+                };
+                egui::Frame::new()
+                    .fill(self.theme.palette.panel.color())
+                    .stroke(Stroke::new(1.0_f32, border))
+                    .corner_radius(6u8)
+                    .inner_margin(egui::Margin::symmetric(18, 16))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                FontWeight::SemiBold
+                                    .text(
+                                        self.theme.fonts.small + 1.0,
+                                        format!("Шанс события при смене раунда: {}%", room.event_chance),
+                                    )
+                                    .color(self.theme.palette.muted.color()),
+                            );
+                            if is_host && room.stage == "playing" {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if room.current_event.is_some()
+                                        && ui.add_enabled(has_controls, animated_button(egui::Button::new("Скрыть"))).clicked()
+                                    {
+                                        self.send(json!({"type":"host_action","action":"clear_event"}));
+                                    }
+                                    if ui.add_enabled(has_controls, animated_button(self.theme.accent_button("Запустить событие"))).clicked() {
+                                        self.send(json!({"type":"host_action","action":"trigger_event"}));
+                                    }
+                                });
+                            }
+                        });
+                        ui.add_space(10.0);
+                        if let Some(event) = &room.current_event {
+                            ui.label(
+                                FontWeight::Bold
+                                    .text(self.theme.fonts.button + 4.0, &event.title)
+                                    .color(self.theme.palette.accent_title.color()),
+                            );
+                            ui.label(
+                                FontWeight::Medium
+                                    .text(self.theme.fonts.small + 1.0, format!("Раунд {}", event.round))
+                                    .color(self.theme.palette.muted.color()),
+                            );
+                            if !event.description.trim().is_empty() {
+                                ui.add_space(6.0);
+                                ui.add(
+                                    egui::Label::new(
+                                        FontWeight::Regular
+                                            .text(self.theme.fonts.bunker_body, &event.description)
+                                            .color(self.theme.palette.text.color()),
+                                    )
+                                    .wrap(),
+                                );
+                            }
+                        } else {
+                            ui.label(
+                                FontWeight::Regular
+                                    .text(self.theme.fonts.body, "В этом раунде особых событий не произошло.")
+                                    .color(self.theme.palette.muted.color()),
+                            );
+                        }
+                        let past: Vec<_> = room.event_history.iter().rev()
+                            .filter(|ev| room.current_event.as_ref().is_none_or(|cur| cur.title != ev.title || cur.round != ev.round))
+                            .take(5)
+                            .collect();
+                        if !past.is_empty() {
+                            ui.add_space(12.0);
+                            ui.separator();
+                            ui.add_space(8.0);
+                            ui.label(
+                                FontWeight::SemiBold
+                                    .text(self.theme.fonts.small + 1.0, "Прошедшие события")
+                                    .color(self.theme.palette.muted.color()),
+                            );
+                            ui.add_space(4.0);
+                            for ev in past {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(
+                                        FontWeight::SemiBold
+                                            .text(self.theme.fonts.small + 1.0, format!("Раунд {} · {}", ev.round, ev.title))
+                                            .color(self.theme.palette.text.color()),
+                                    );
+                                    if !ev.description.trim().is_empty() {
+                                        ui.label(
+                                            RichText::new(format!("— {}", ev.description))
+                                                .size(self.theme.fonts.small + 1.0)
+                                                .color(self.theme.palette.muted.color()),
+                                        );
+                                    }
+                                });
+                            }
+                        }
+                    });
+            });
         });
         ui.add_space((self.layout.section_min_height - (ui.cursor().top() - top)).max(0.0));
     }
@@ -1227,6 +1562,7 @@ impl BunkerApp {
     fn ui_game(&mut self, ui: &mut egui::Ui, room: &Room) {
         self.active_section = 0;
         let requested_section = self.pending_section.take();
+        let jump_to_vote = std::mem::take(&mut self.pending_vote_jump);
         egui::ScrollArea::vertical().id_salt(("entire-game", &room.code)).auto_shrink([false, false])
             .show_viewport(ui, |ui, viewport| {
             let sections = [
@@ -1252,27 +1588,186 @@ impl BunkerApp {
                 section(self, ui, room);
                 section_rule(ui, &self.theme);
             }
-            ui.horizontal_wrapped(|ui| {
-                if let Some(sides) = crate::dice::roll_buttons(ui, self.online) {
-                    self.send(json!({"type":"roll","sides":sides}));
-                }
-            });
-            if room.vote_open {
-                ui.label(format!("Голосование открыто · получено голосов: {}", room.ballots_count));
-                for p in room.players.iter().filter(|p| p.active && p.id != room.you) {
-                    if ui.add(animated_button(egui::Button::new(format!("Голосовать за {}", p.name)))).clicked() {
-                        self.send(json!({"type":"vote","target":p.id}));
+            let body_width = game_body_width(ui.available_width());
+            let viewer_active = room.players.iter().any(|p| p.id == room.you && p.active);
+            ui.add_space(20.0);
+            let bottom_top = ui.next_widget_position().y;
+            if jump_to_vote {
+                scroll_target = Some(bottom_top);
+            }
+            ui.vertical_centered(|ui| {
+                ui.allocate_ui_with_layout(egui::vec2(body_width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_width(body_width);
+                    if room.vote_open || !room.vote_results.is_empty() {
+                        let border = if room.vote_open {
+                            self.theme.palette.accent.color()
+                        } else {
+                            self.theme.palette.outline.color()
+                        };
+                        egui::Frame::new()
+                            .fill(self.theme.palette.panel.color())
+                            .stroke(Stroke::new(1.0_f32, border))
+                            .corner_radius(6u8)
+                            .inner_margin(egui::Margin::symmetric(16, 14))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(
+                                        FontWeight::Bold
+                                            .text(
+                                                self.theme.fonts.button + 2.0,
+                                                if room.vote_candidates.is_some() {
+                                                    "Переголосование"
+                                                } else {
+                                                    "Голосование"
+                                                },
+                                            )
+                                            .color(self.theme.palette.accent_title.color()),
+                                    );
+                                    if room.vote_open {
+                                        ui.label(
+                                            FontWeight::Medium
+                                                .text(
+                                                    self.theme.fonts.small + 1.0,
+                                                    format!("· получено голосов: {}", room.ballots_count),
+                                                )
+                                                .color(self.theme.palette.muted.color()),
+                                        );
+                                    } else if room.vote_tied {
+                                        ui.label(
+                                            FontWeight::Bold
+                                                .text(self.theme.fonts.small + 1.0, "· Ничья по голосам!")
+                                                .color(self.theme.palette.negative.color()),
+                                        );
+                                    }
+                                });
+                                ui.add_space(8.0);
+                                if room.vote_open {
+                                    if !viewer_active {
+                                        ui.label(
+                                            RichText::new("Выбывшие участники не могут голосовать.")
+                                                .color(self.theme.palette.muted.color()),
+                                        );
+                                    } else {
+                                        let candidates: Vec<_> = room.players.iter().filter(|p| {
+                                            p.active
+                                                && p.id != room.you
+                                                && room.vote_candidates.as_ref().is_none_or(|list| list.contains(&p.id))
+                                        }).collect();
+                                        if candidates.is_empty() {
+                                            ui.label(
+                                                RichText::new("Нет доступных кандидатов для вашего голоса.")
+                                                    .color(self.theme.palette.muted.color()),
+                                            );
+                                        } else {
+                                            ui.horizontal_wrapped(|ui| {
+                                                for p in candidates {
+                                                    let chosen = room.your_vote.as_deref() == Some(p.id.as_str());
+                                                    let label = if chosen {
+                                                        format!("✓ {}", p.name)
+                                                    } else {
+                                                        format!("Против {}", p.name)
+                                                    };
+                                                    let btn = if chosen {
+                                                        self.theme.accent_button(&label)
+                                                    } else {
+                                                        egui::Button::new(label)
+                                                    };
+                                                    if ui.add_enabled(self.online, animated_button(btn)).clicked() {
+                                                        self.send(json!({"type":"vote","target":p.id}));
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    }
+                                }
+                                if !room.vote_results.is_empty() {
+                                    if room.vote_open {
+                                        ui.add_space(8.0);
+                                        ui.separator();
+                                        ui.add_space(6.0);
+                                    }
+                                    let max_votes = room.vote_results.iter().map(|r| r.votes).max().unwrap_or(1).max(1);
+                                    for result in &room.vote_results {
+                                        let ratio = result.votes as f32 / max_votes as f32;
+                                        ui.horizontal(|ui| {
+                                            ui.label(FontWeight::SemiBold.text(self.theme.fonts.body, &result.name));
+                                            ui.label(
+                                                RichText::new(format!("— {} голос(ов)", result.votes))
+                                                    .color(self.theme.palette.accent_title.color()),
+                                            );
+                                        });
+                                        let (bar_rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(ui.available_width(), 6.0),
+                                            egui::Sense::hover(),
+                                        );
+                                        ui.painter().rect_filled(bar_rect, 3u8, self.theme.palette.surface.color());
+                                        let fill_rect = egui::Rect::from_min_size(
+                                            bar_rect.min,
+                                            egui::vec2(bar_rect.width() * ratio, bar_rect.height()),
+                                        );
+                                        ui.painter().rect_filled(fill_rect, 3u8, self.theme.palette.accent.color());
+                                        ui.add_space(4.0);
+                                    }
+                                    if !room.vote_open && room.you == room.host_id && room.host_controls.is_some() {
+                                        ui.add_space(6.0);
+                                        ui.horizontal_wrapped(|ui| {
+                                            if room.vote_tied {
+                                                if ui.add_enabled(self.online, animated_button(self.theme.accent_button("Переголосование среди лидеров"))).clicked() {
+                                                    self.send(json!({"type":"host_action","action":"runoff_vote"}));
+                                                }
+                                            } else if let Some(leader) = room.vote_results.first() {
+                                                let leader_active = leader.player_id.as_deref().is_some_and(|id| {
+                                                    room.players.iter().any(|p| p.id == id && p.active)
+                                                });
+                                                if leader_active
+                                                    && ui.add_enabled(
+                                                        self.online,
+                                                        animated_button(self.theme.accent_button(&format!("Исключить лидера: {}", leader.name))),
+                                                    ).clicked()
+                                                {
+                                                    self.send(json!({"type":"host_action","action":"exclude_vote_leader"}));
+                                                }
+                                            }
+                                        });
+                                    }
+                                }
+                            });
+                        ui.add_space(14.0);
                     }
-                }
-            }
-            for result in &room.vote_results {
-                ui.label(format!("{}: {} голосов", result.name, result.votes));
-            }
-            ui.add_space(14.0);
-            ui.label(FontWeight::Bold.text(self.theme.fonts.button, "Журнал партии"));
-            for event in room.log.iter().rev().take(8) {
-                ui.label(RichText::new(event).color(self.theme.palette.muted.color()));
-            }
+
+                    egui::Frame::new()
+                        .fill(self.theme.palette.panel.color())
+                        .stroke(Stroke::new(1.0_f32, self.theme.palette.button.color()))
+                        .corner_radius(6u8)
+                        .inner_margin(egui::Margin::symmetric(16, 14))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    FontWeight::Bold
+                                        .text(self.theme.fonts.button + 1.0, "Кубики и журнал партии")
+                                        .color(self.theme.palette.text.color()),
+                                );
+                                ui.add_space(8.0);
+                                if let Some(sides) = crate::dice::roll_buttons(ui, self.online) {
+                                    self.send(json!({"type":"roll","sides":sides}));
+                                }
+                            });
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.add_space(6.0);
+                            if room.log.is_empty() {
+                                ui.label(RichText::new("Событий пока нет.").color(self.theme.palette.muted.color()));
+                            } else {
+                                for event in room.log.iter().rev().take(12) {
+                                    ui.label(RichText::new(format!("• {event}")).color(self.theme.palette.muted.color()));
+                                }
+                            }
+                        });
+                });
+            });
+            ui.add_space(88.0);
             // Allow the final section to reach the same top alignment as earlier sections.
             let remaining = last_section_top + viewport.height() - ui.next_widget_position().y;
             if remaining > 0.0 { ui.add_space(remaining); }
@@ -1282,17 +1777,79 @@ impl BunkerApp {
         });
     }
     fn ui_finished(&mut self, ui: &mut egui::Ui, room: &Room) {
-        ui.add_space(70.0);
+        let is_host = room.you == room.host_id;
+        let survivors: Vec<_> = room.players.iter().filter(|p| p.active).collect();
+        let eliminated: Vec<_> = room.players.iter().filter(|p| !p.active).collect();
+        ui.add_space(56.0);
         heading(ui, &self.theme, if room.stage == "closed" { "Комната закрыта ведущим" } else { "Партия завершена" });
+        let card_width = (ui.available_width() * 0.62).clamp(320.0, 560.0);
         ui.vertical_centered(|ui| {
-            ui.label(format!("Осталось участников: {}", room.players.iter().filter(|p| p.active).count()));
-            for p in room.players.iter().filter(|p| p.active) {
-                ui.horizontal(|ui| { self.avatar_widget(ui, p.avatar(), false, 29.0); ui.label(&p.name); });
-            }
-            if ui.add(animated_button(self.theme.accent_button("Оценка выживаемости · WIP"))).clicked() {
-                self.show_survivability = true;
-            }
-            if ui.add(animated_button(egui::Button::new("В главное меню"))).clicked() { self.leave_room(); }
+            ui.allocate_ui_with_layout(egui::vec2(card_width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.set_width(card_width);
+                egui::Frame::new()
+                    .fill(self.theme.palette.panel.color())
+                    .stroke(Stroke::new(1.0_f32, self.theme.palette.outline.color()))
+                    .corner_radius(6u8)
+                    .inner_margin(egui::Margin::symmetric(18, 16))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            FontWeight::Bold
+                                .text(self.theme.fonts.button + 1.0, format!("Попали в бункер ({} из {})", survivors.len(), room.seats))
+                                .color(self.theme.palette.positive.color()),
+                        );
+                        ui.add_space(8.0);
+                        if survivors.is_empty() {
+                            ui.label(RichText::new("Никто не остался в бункере.").color(self.theme.palette.muted.color()));
+                        } else {
+                            for p in &survivors {
+                                ui.horizontal(|ui| {
+                                    self.avatar_widget(ui, p.avatar(), p.id == room.you, 30.0);
+                                    ui.label(FontWeight::Bold.text(self.theme.fonts.body, &p.name));
+                                    if let Some(prof) = p.revealed_card("profession") {
+                                        ui.label(
+                                            RichText::new(format!("· {}", prof.dossier_text().0))
+                                                .color(self.theme.palette.muted.color()),
+                                        );
+                                    }
+                                });
+                                ui.add_space(4.0);
+                            }
+                        }
+                        if !eliminated.is_empty() {
+                            ui.add_space(8.0);
+                            ui.separator();
+                            ui.add_space(6.0);
+                            ui.label(
+                                FontWeight::SemiBold
+                                    .text(self.theme.fonts.small + 1.0, format!("Выбыли ({})", eliminated.len()))
+                                    .color(self.theme.palette.muted.color()),
+                            );
+                            ui.horizontal_wrapped(|ui| {
+                                for p in &eliminated {
+                                    ui.label(
+                                        RichText::new(format!("○ {}", p.name))
+                                            .color(self.theme.palette.muted.color()),
+                                    );
+                                }
+                            });
+                        }
+                    });
+                ui.add_space(16.0);
+                ui.horizontal_wrapped(|ui| {
+                    if is_host && room.stage == "finished" {
+                        if ui.add_enabled(self.online, animated_button(self.theme.accent_button("Начать заново"))).clicked() {
+                            self.send(json!({"type":"host_action","action":"restart"}));
+                        }
+                    }
+                    if ui.add(animated_button(egui::Button::new("Оценка выживаемости · WIP"))).clicked() {
+                        self.show_survivability = true;
+                    }
+                    if ui.add(animated_button(egui::Button::new("В главное меню"))).clicked() {
+                        self.leave_room();
+                    }
+                });
+            });
         });
     }
     fn room_creation(&mut self, ui: &mut egui::Ui, width: f32, list_height: f32, active: bool) {
@@ -1358,7 +1915,7 @@ impl BunkerApp {
             right.heading("События");
             right.label("Шанс события");
             right.add(egui::Slider::new(&mut self.event_chance, 0..=100).suffix("%"));
-            right.label(RichText::new("Шанс сохраняется в комнате. Игровые события пока не запускаются.")
+            right.label(RichText::new("Вероятность случайного события при смене раунда (из пака или базового набора).")
                 .color(self.theme.palette.muted.color()).size(self.theme.fonts.small));
             let remaining = (list_rect.bottom() - right.next_widget_position().y).max(0.0);
             right.add_space(remaining);
@@ -1481,11 +2038,13 @@ impl BunkerApp {
                                 .on_hover_text("Присоединиться");
                             if submit.clicked() || (field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
                                 let code = self.join_code.trim().to_uppercase();
-                                if code.len() == 8 && code.chars().all(|c| c.is_ascii_alphanumeric()) {
+                                let valid = code.len() == 8 && code.bytes().all(|b| matches!(b, b'A'..=b'Z' | b'2'..=b'9'));
+                                if valid {
+                                    self.join_code = code.clone();
                                     self.start_request(Some(code));
                                     self.show_join = false;
                                 } else {
-                                    self.notify("Нужен восьмисимвольный код");
+                                    self.notify("Нужен 8-символьный код (латинские буквы и цифры 2–9)");
                                 }
                             }
                         });
@@ -1516,10 +2075,23 @@ impl BunkerApp {
             egui::Window::new("Настройки").anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).movable(false).resizable(false).collapsible(false).open(&mut open).fade_in(true).fade_out(true).interactable(active).show(ctx, |ui| {
                 if !active { ui.disable(); }
                 ui.vertical_centered(|ui| {
+                    ui.label("Никнейм:");
+                    ui.add(egui::TextEdit::singleline(&mut self.nickname).char_limit(24).desired_width(430.0));
+                    ui.add_space(6.0);
                     ui.label("Адрес сервера:");
                     ui.add(egui::TextEdit::singleline(&mut self.server_url).desired_width(430.0));
 
-                    if ui.add(animated_button(egui::Button::new("Сохранить"))).clicked() { self.save_config(); }
+                    ui.add_space(6.0);
+                    if ui.add(animated_button(self.theme.accent_button("Сохранить"))).clicked() {
+                        let name = self.nickname.trim();
+                        let len = name.chars().count();
+                        if !(2..=24).contains(&len) {
+                            self.notify("Ник должен содержать от 2 до 24 символов");
+                        } else {
+                            self.nickname = name.to_owned();
+                            self.save_config();
+                        }
+                    }
                     ui.separator();
                     if ui.add(animated_button(egui::Button::new("Перезагрузить оформление"))).on_hover_text("Ctrl+Shift+R").clicked() {
                         self.reload_appearance(ctx);
@@ -1554,7 +2126,7 @@ impl BunkerApp {
                                 self.send(json!({"type":"set_seats","seats":seats}));
                             }
                         });
-                        if ui.add(egui::Slider::new(&mut chance, 0..=100).text("Шанс событий (WIP)")).changed() {
+                        if ui.add(egui::Slider::new(&mut chance, 0..=100).text("Шанс событий (%)")).changed() {
                             self.send(json!({"type":"set_event_chance","chance":chance}));
                         }
                         if ui.add(animated_button(egui::Button::new("Выбрать другой пак…"))).clicked() { self.pick_pack(); }
@@ -1673,8 +2245,37 @@ impl eframe::App for BunkerApp {
                             self.game_navigation(ctx);
                             egui::Area::new(egui::Id::new("leave-game"))
                                 .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
+                                .order(egui::Order::Foreground)
                                 .movable(false).show(ctx, |ui| {
-                                    if ui.add(animated_button(egui::Button::new("В меню"))).clicked() { self.leave_room(); }
+                                    if self.confirm_leave {
+                                        egui::Frame::new()
+                                            .fill(self.theme.palette.panel.color())
+                                            .stroke(Stroke::new(1.0_f32, self.theme.palette.negative.color()))
+                                            .corner_radius(6u8)
+                                            .inner_margin(egui::Margin::symmetric(10, 6))
+                                            .show(ui, |ui| {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(
+                                                        FontWeight::SemiBold
+                                                            .text(self.theme.fonts.small + 1.0, "Выйти из партии?")
+                                                            .color(self.theme.palette.text.color()),
+                                                    );
+                                                    let yes = egui::Button::new(
+                                                        FontWeight::SemiBold
+                                                            .text(self.theme.fonts.small + 1.0, "Да")
+                                                            .color(self.theme.palette.negative.color()),
+                                                    );
+                                                    if ui.add(animated_button(yes)).clicked() {
+                                                        self.leave_room();
+                                                    }
+                                                    if ui.add(animated_button(egui::Button::new("Нет"))).clicked() {
+                                                        self.confirm_leave = false;
+                                                    }
+                                                });
+                                            });
+                                    } else if ui.add(animated_button(egui::Button::new("В меню"))).clicked() {
+                                        self.confirm_leave = true;
+                                    }
                                 });
                         },
                         _ => self.ui_finished(ui, &room)

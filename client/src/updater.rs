@@ -33,6 +33,7 @@ struct Asset {
 
 struct Update {
     version: Version,
+    #[cfg_attr(not(windows), allow(dead_code))]
     bytes: Vec<u8>,
 }
 

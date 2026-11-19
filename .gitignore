@@ -11,6 +11,7 @@ Thumbs.db
 .idea/
 # Local auth tokens and private configuration
 murr-config.json
+murr-session.json
 my-pack.json
 .env
 .env.*

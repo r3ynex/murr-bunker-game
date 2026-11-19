@@ -167,6 +167,33 @@ fn category_label<'a>(room: &'a Room, kind: &'a str) -> &'a str {
         .unwrap_or_else(|| category_name(kind))
 }
 
+fn section_card<R>(
+    ui: &mut Ui,
+    theme: &Theme,
+    title: &str,
+    contents: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    egui::Frame::new()
+        .fill(theme.palette.surface.color())
+        .stroke(egui::Stroke::new(
+            1.0_f32,
+            theme.palette.button.color().gamma_multiply(0.55),
+        ))
+        .corner_radius(4u8)
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(
+                FontWeight::SemiBold
+                    .text(theme.fonts.small + 1.0, title)
+                    .color(theme.palette.accent_title.color()),
+            );
+            ui.add_space(4.0);
+            contents(ui)
+        })
+        .inner
+}
+
 impl HostPanel {
     pub fn show(
         &mut self,
@@ -178,27 +205,37 @@ impl HostPanel {
     ) -> Option<PanelAction> {
         let mut command = None;
         egui::Window::new("Панель ведущего")
-            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-14.0, 48.0))
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-14.0, 56.0))
             .movable(false)
             .resizable(false)
             .collapsible(false)
             .open(open)
-            .default_width(410.0)
+            .default_width(420.0)
             .max_width(440.0)
             .fade_in(true)
             .fade_out(true)
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(theme.palette.panel.color())
+                    .stroke(egui::Stroke::new(1.0_f32, theme.palette.outline.color()))
+                    .corner_radius(6u8)
+                    .inner_margin(12),
+            )
             .show(ctx, |ui| {
-                ui.set_width(410.0);
+                ui.set_width(412.0);
                 if let Some((name, question)) = self.confirm {
-                    ui.label(FontWeight::Bold.text(theme.fonts.body, question));
-                    ui.horizontal_wrapped(|ui| {
-                        if button(ui, online, "Подтвердить") {
-                            command = Some(PanelAction::Send(action(name)));
-                            self.confirm = None;
-                        }
-                        if button(ui, true, "Отмена") {
-                            self.confirm = None;
-                        }
+                    section_card(ui, theme, "Подтверждение", |ui| {
+                        ui.label(FontWeight::Bold.text(theme.fonts.body, question));
+                        ui.add_space(6.0);
+                        ui.horizontal_wrapped(|ui| {
+                            if button(ui, online, "Подтвердить") {
+                                command = Some(PanelAction::Send(action(name)));
+                                self.confirm = None;
+                            }
+                            if button(ui, true, "Отмена") {
+                                self.confirm = None;
+                            }
+                        });
                     });
                     return;
                 }
@@ -216,20 +253,20 @@ impl HostPanel {
                 });
                 ui.separator();
                 egui::ScrollArea::vertical()
-                    .max_height((ctx.content_rect().height() - 205.0).max(100.0))
+                    .max_height((ctx.content_rect().height() - 220.0).max(120.0))
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         let playing = room.stage == "playing";
                         command = match self.tab {
                             Tab::Round => self
-                                .round(ui, room, online && playing, advanced && playing)
+                                .round(ui, theme, room, online && playing, advanced && playing)
                                 .map(PanelAction::Send),
                             Tab::Cards => self.cards(ui, room, advanced && playing),
                             Tab::Bunker => self
                                 .bunker(ui, controls, advanced && playing)
                                 .map(PanelAction::Send),
                             Tab::Players => self
-                                .players(ui, room, online && playing, advanced)
+                                .players(ui, theme, room, online && playing, advanced)
                                 .map(PanelAction::Send),
                         };
                     });
@@ -241,7 +278,7 @@ impl HostPanel {
                     if button(
                         ui,
                         advanced && controls.is_some_and(|c| c.undo),
-                        "Отменить действие",
+                        "↩ Отменить",
                     ) {
                         command = Some(PanelAction::Send(old_action("host_undo")));
                     }
@@ -262,59 +299,112 @@ impl HostPanel {
     fn round(
         &mut self,
         ui: &mut Ui,
+        theme: &Theme,
         room: &Room,
         enabled: bool,
         advanced: bool,
     ) -> Option<Value> {
         let mut command = None;
-        ui.label("Таймер обсуждения");
-        ui.horizontal_wrapped(|ui| {
-            for seconds in [15, 30, 60] {
-                if button(ui, advanced, &format!("{seconds} сек.")) {
-                    command =
-                        Some(json!({"type":"host_action","action":"timer","seconds":seconds}));
+        section_card(ui, theme, "Таймер обсуждения", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for seconds in [15, 30, 60] {
+                    if button(ui, advanced, &format!("{seconds} сек.")) {
+                        command =
+                            Some(json!({"type":"host_action","action":"timer","seconds":seconds}));
+                    }
                 }
-            }
-            if button(ui, advanced && room.speech_ends_at > 0, "Сбросить") {
-                command = Some(json!({"type":"host_action","action":"timer","seconds":0}));
+                if button(ui, advanced && room.speech_ends_at > 0, "Сбросить") {
+                    command = Some(json!({"type":"host_action","action":"timer","seconds":0}));
+                }
+            });
+        });
+        ui.add_space(6.0);
+        let active_count = room.players.iter().filter(|p| p.active).count();
+        let round_title = format!(
+            "Раунд {} · Выживших: {} · Голосов: {}",
+            room.round, active_count, room.ballots_count
+        );
+        section_card(ui, theme, &round_title, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if button(
+                    ui,
+                    enabled,
+                    if room.vote_open {
+                        "Подвести итоги"
+                    } else {
+                        "Начать голосование"
+                    },
+                ) {
+                    command = Some(old_action(if room.vote_open {
+                        "finish_vote"
+                    } else {
+                        "start_vote"
+                    }));
+                }
+                if button(ui, advanced, "Круг без изгнания") {
+                    command = Some(action("skip_vote"));
+                }
+                if button(ui, enabled && !room.vote_open, "Следующий раунд") {
+                    command = Some(old_action("next_round"));
+                }
+                if button(ui, enabled, "Завершить партию") {
+                    command = Some(old_action("finish"));
+                }
+            });
+            if !room.vote_open && !room.vote_results.is_empty() {
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    if room.vote_tied {
+                        if button(ui, advanced, "Переголосование среди лидеров") {
+                            command = Some(action("runoff_vote"));
+                        }
+                    } else if let Some(leader) = room.vote_results.first() {
+                        let leader_active = leader.player_id.as_deref().is_some_and(|id| {
+                            room.players.iter().any(|p| p.id == id && p.active)
+                        });
+                        if leader_active
+                            && button(
+                                ui,
+                                advanced,
+                                &format!("Исключить лидера ({})", leader.name),
+                            )
+                        {
+                            command = Some(action("exclude_vote_leader"));
+                        }
+                    }
+                });
             }
         });
-        ui.separator();
-        ui.label(format!(
-            "Раунд {} · голосов: {}",
-            room.round, room.ballots_count
-        ));
-        ui.horizontal_wrapped(|ui| {
-            if button(
-                ui,
-                enabled,
-                if room.vote_open {
-                    "Подвести итоги"
-                } else {
-                    "Начать голосование"
-                },
-            ) {
-                command = Some(old_action(if room.vote_open {
-                    "finish_vote"
-                } else {
-                    "start_vote"
-                }));
+        ui.add_space(6.0);
+        let event_title = format!("События раунда · шанс {}%", room.event_chance);
+        section_card(ui, theme, &event_title, |ui| {
+            if let Some(event) = &room.current_event {
+                ui.label(
+                    FontWeight::SemiBold
+                        .text(theme.fonts.small + 1.0, &event.title)
+                        .color(theme.palette.text.color()),
+                );
             }
-            if button(ui, advanced, "Круг без изгнания") {
-                command = Some(action("skip_vote"));
-            }
-            if button(ui, enabled && !room.vote_open, "Следующий раунд") {
-                command = Some(old_action("next_round"));
-            }
-            if button(ui, enabled, "Завершить партию") {
-                command = Some(old_action("finish"));
-            }
+            ui.horizontal_wrapped(|ui| {
+                if button(ui, advanced, "Запустить событие") {
+                    command = Some(action("trigger_event"));
+                }
+                if button(
+                    ui,
+                    advanced && room.current_event.is_some(),
+                    "Скрыть событие",
+                ) {
+                    command = Some(action("clear_event"));
+                }
+            });
         });
-        ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            if let Some(sides) = crate::dice::roll_buttons(ui, enabled) {
-                command = Some(json!({"type":"roll","sides":sides}));
-            }
+        ui.add_space(6.0);
+        section_card(ui, theme, "Бросок кубиков", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if let Some(sides) = crate::dice::roll_buttons(ui, enabled) {
+                    command = Some(json!({"type":"roll","sides":sides}));
+                }
+            });
         });
         command
     }
@@ -575,57 +665,76 @@ impl HostPanel {
     fn players(
         &mut self,
         ui: &mut Ui,
+        theme: &Theme,
         room: &Room,
         enabled: bool,
         advanced: bool,
     ) -> Option<Value> {
         let mut command = None;
-        ui.horizontal(|ui| {
-            ui.label(format!("Мест в бункере: {}", room.seats));
-            for (label, delta) in [("−", -1), ("+", 1)] {
-                let seats = room.seats as i32 + delta;
-                if button(ui, enabled && advanced && (1..=15).contains(&seats), label) {
-                    command = Some(json!({"type":"host_action","action":"seats","seats":seats}));
-                }
-            }
-        });
-        ui.separator();
-        for player in &room.players {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(&player.name);
-                if player.id == room.host_id {
-                    ui.weak("Ведущий");
-                }
-                if button(
-                    ui,
-                    enabled,
-                    if player.active {
-                        "Выгнать"
-                    } else {
-                        "Вернуть"
-                    },
-                ) {
-                    command = Some(
-                        json!({"type":"set_active","playerId":player.id,"active":!player.active}),
-                    );
+        section_card(ui, theme, "Вместимость бункера", |ui| {
+            ui.horizontal(|ui| {
+                ui.label(format!("Мест в бункере: {}", room.seats));
+                for (label, delta) in [("−", -1), ("+", 1)] {
+                    let seats = room.seats as i32 + delta;
+                    if button(ui, enabled && advanced && (1..=15).contains(&seats), label) {
+                        command = Some(json!({"type":"host_action","action":"seats","seats":seats}));
+                    }
                 }
             });
-        }
-        ui.separator();
-        ui.label("Передать права ведущего");
-        let selected = choose_player(
-            ui,
-            "new-host",
-            &mut self.new_host,
-            room,
-            false,
-            Some(&room.host_id),
-        );
-        if button(ui, advanced && selected, "Сменить ведущего") {
-            command = Some(
-                json!({"type":"host_action","action":"transfer_host","targetId":self.new_host}),
+        });
+        ui.add_space(6.0);
+        section_card(ui, theme, "Участники партии", |ui| {
+            for player in &room.players {
+                ui.horizontal(|ui| {
+                    let dot = if player.active {
+                        theme.palette.positive.color()
+                    } else {
+                        theme.palette.negative.color()
+                    };
+                    ui.label(egui::RichText::new("●").color(dot));
+                    ui.label(&player.name);
+                    if player.id == room.host_id {
+                        ui.label(
+                            egui::RichText::new("Ведущий")
+                                .size(theme.fonts.small)
+                                .color(theme.palette.accent_title.color()),
+                        );
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if button(
+                            ui,
+                            enabled,
+                            if player.active {
+                                "Выгнать"
+                            } else {
+                                "Вернуть"
+                            },
+                        ) {
+                            command = Some(
+                                json!({"type":"set_active","playerId":player.id,"active":!player.active}),
+                            );
+                        }
+                    });
+                });
+            }
+        });
+        ui.add_space(6.0);
+        section_card(ui, theme, "Передать права ведущего", |ui| {
+            let selected = choose_player(
+                ui,
+                "new-host",
+                &mut self.new_host,
+                room,
+                false,
+                Some(&room.host_id),
             );
-        }
+            ui.add_space(4.0);
+            if button(ui, advanced && selected, "Сменить ведущего") {
+                command = Some(
+                    json!({"type":"host_action","action":"transfer_host","targetId":self.new_host}),
+                );
+            }
+        });
         command
     }
 }

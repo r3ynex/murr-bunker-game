@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#151821">
-  <meta name="description" content="Мобильный тестовый клиент игры Murr Bunker">
-  <title>Murr Bunker — мобильный тестер</title>
+  <meta name="theme-color" content="#0a0a0c">
+  <meta name="description" content="Веб-клиент игры Murr Bunker">
+  <title>Murr Bunker — онлайн-комната</title>
   <link rel="stylesheet" href="/style.css">
   <script type="module" src="/app.js"></script>
 </head>
@@ -13,63 +13,137 @@
   <main class="shell">
     <header class="header">
       <div class="brand">
-        <span class="brand-mark">M</span>
-        <div><strong>MURR / БУНКЕР</strong><small>Тестовый мобильный клиент • 0.1</small></div>
+        <span class="brand-mark" aria-hidden="true">M</span>
+        <div>
+          <strong>MURR / БУНКЕР</strong>
+          <small>Веб-клиент • совместим с ПК-версией</small>
+        </div>
       </div>
-      <span class="pill" id="connection">Не подключено</span>
+      <span class="pill" id="connection">○ Не подключено</span>
     </header>
 
-    <section class="panel" id="setup">
-      <h1>Сыграть с друзьями</h1>
-      <p class="muted">Работает прямо в браузере телефона. Комнаты — на Cloudflare, голос — в Discord.</p>
-      <label for="nickname">Твой ник</label>
-      <input id="nickname" type="text" maxlength="24" minlength="2" autocomplete="nickname" value="Игрок">
-      <label for="avatarChoice">Номер аватара</label>
-      <input id="avatarChoice" type="number" inputmode="numeric" min="1" max="4294967295" value="1" list="avatarChoices">
-      <datalist id="avatarChoices">
-        <option value="1">01 · ✦</option><option value="2">02 · ◆</option>
-        <option value="3">03 · ☼</option><option value="4">04 · ✿</option>
-        <option value="5">05 · ★</option><option value="6">06 · ♣</option>
-        <option value="7">07 · ◇</option><option value="8">08 · ◈</option>
-        <option value="9">09 · ✧</option><option value="10">10 · ●</option>
-        <option value="11">11 · ☻</option><option value="12">12 · ♟</option>
-      </datalist>
-      <button id="create" class="primary">Создать комнату</button>
-      <div class="divider-text">или войти в существующую</div>
-      <label for="joinCode">Код комнаты</label>
-      <div class="inline">
-        <input id="joinCode" type="text" inputmode="text" maxlength="8" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="8 символов">
-        <button id="join">Войти</button>
+    <section class="panel setup-panel" id="setup">
+      <div class="setup-hero">
+        <h1>Сыграть с друзьями</h1>
+        <p class="muted">Работает прямо в браузере телефона и ПК. Комнаты на Cloudflare, обсуждение — в Discord.</p>
       </div>
+
+      <div class="form-grid">
+        <div class="field">
+          <label for="nickname">Твой ник</label>
+          <input id="nickname" type="text" maxlength="24" minlength="2" autocomplete="nickname" value="Игрок" placeholder="От 2 до 24 символов">
+        </div>
+        <div class="field">
+          <label for="avatarChoice">Номер аватара</label>
+          <input id="avatarChoice" type="number" inputmode="numeric" min="1" max="4294967295" value="1">
+        </div>
+      </div>
+
+      <div class="avatar-picker" id="avatarPicker" role="radiogroup" aria-label="Быстрый выбор аватара"></div>
+
+      <div class="setup-actions">
+        <button id="create" class="primary" type="button">Создать комнату</button>
+        <div class="divider-text"><span>или войти по коду</span></div>
+        <div class="join-row">
+          <input id="joinCode" type="text" inputmode="text" maxlength="8" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="КОД ИЗ 8 СИМВОЛОВ" aria-label="Код комнаты">
+          <button id="join" class="secondary" type="button">Войти</button>
+        </div>
+      </div>
+
       <details class="settings">
         <summary>Настройки подключения</summary>
-        <label for="serverUrl">Адрес API (обычно менять не нужно)</label>
-        <input id="serverUrl" type="url" autocomplete="url" spellcheck="false">
-        <p class="muted tiny">Если открыть тестер на Cloudflare Worker, сервер уже подключён автоматически.</p>
+        <div class="settings-body">
+          <label for="serverUrl">Адрес API (обычно менять не нужно)</label>
+          <input id="serverUrl" type="url" autocomplete="url" spellcheck="false">
+          <p class="muted tiny">Если открыть клиент прямо на Cloudflare Worker, сервер подключается автоматически.</p>
+        </div>
       </details>
     </section>
 
     <section id="room" hidden>
       <div class="panel room-top">
-        <div class="inline space-between">
-          <div><small class="muted">Комната</small><h1 id="roomCode">—</h1></div>
-          <button id="copyCode">Копировать код</button>
+        <div class="room-top-row">
+          <div class="room-identity">
+            <small class="eyebrow">Код комнаты</small>
+            <h1 id="roomCode">—</h1>
+          </div>
+          <div class="room-top-actions">
+            <button id="copyCode" class="btn-accent-ghost" type="button">Копировать код</button>
+            <button id="reconnect" class="btn-ghost" type="button">Переподключить</button>
+            <button id="leave" class="btn-danger-ghost" type="button">Выйти</button>
+          </div>
         </div>
-        <p id="roomMeta" class="muted"></p>
-        <p id="speechTimer" hidden></p>
-        <div class="inline">
-          <button id="reconnect">Переподключиться</button>
-          <button id="leave">В другую комнату</button>
+        <div class="room-meta-bar">
+          <p id="roomMeta" class="muted"></p>
+          <span id="speechTimer" class="timer-pill" hidden></span>
         </div>
       </div>
       <div id="roomUI"></div>
     </section>
 
     <section class="panel info" aria-label="Статус">
-      <p id="status" role="status" aria-live="polite">Для онлайн-игры потребуется один раз развернуть Cloudflare Worker.</p>
+      <p id="status" role="status" aria-live="polite">Готов к подключению. Создай комнату или введи код от ведущего.</p>
     </section>
-    <footer>Временный интерфейс для проверки сетевых механик · Не финальный дизайн</footer>
+    <footer>Murr Bunker • Веб-клиент для совместной игры с настольной версией</footer>
   </main>
+
+  <dialog id="cardEditorModal" class="modal" aria-labelledby="editorModalTitle">
+    <div class="modal-head">
+      <div>
+        <small class="eyebrow">Редактор ведущего</small>
+        <h2 id="editorModalTitle">Карточка игрока</h2>
+      </div>
+      <button id="editorCloseX" class="btn-ghost btn-sm" type="button" aria-label="Закрыть">✕</button>
+    </div>
+
+    <div class="modal-section">
+      <label for="editorCategory">Категория характеристики</label>
+      <select id="editorCategory"></select>
+    </div>
+
+    <div id="editorInventorySection" class="modal-section" hidden>
+      <label>Предметы в ячейке</label>
+      <div id="editorItemList" class="item-checklist"></div>
+      <div class="editor-inline-row">
+        <input id="editorNewItem" type="text" maxlength="200" placeholder="Добавить новый предмет…">
+        <button id="editorAddItemBtn" class="btn-accent-ghost btn-sm" type="button">Добавить</button>
+      </div>
+      <div class="actions">
+        <button id="editorTransferBtn" class="btn-accent-ghost btn-sm" type="button">Передать выбранное</button>
+        <button id="editorRemoveItemsBtn" class="btn-danger-ghost btn-sm" type="button">Удалить выбранное</button>
+      </div>
+    </div>
+
+    <div id="editorHealthSection" class="modal-section" hidden>
+      <label for="editorHealthDegree">Степень здоровья (пустое поле убирает степень)</label>
+      <div id="editorHealthPresets" class="actions compact-actions"></div>
+      <div class="editor-inline-row">
+        <input id="editorHealthDegree" type="text" maxlength="160" placeholder="Например: Лёгкая степень">
+        <button id="editorSaveHealthBtn" class="btn-accent-ghost btn-sm" type="button">Сохранить степень</button>
+      </div>
+    </div>
+
+    <div id="editorSwapSection" class="modal-section">
+      <label for="editorRecipient">Другой игрок (для обмена картой или передачи предметов)</label>
+      <div class="editor-inline-row">
+        <select id="editorRecipient"></select>
+        <button id="editorSwapBtn" class="btn-ghost btn-sm" type="button">Обменять карты</button>
+      </div>
+    </div>
+
+    <div class="modal-section">
+      <label id="editorTextLabel" for="editorText">Текст характеристики</label>
+      <textarea id="editorText" rows="4" maxlength="2000" placeholder="Новый текст характеристики…"></textarea>
+    </div>
+
+    <div class="actions modal-footer">
+      <button id="editorSaveTextBtn" class="primary" type="button">Применить текст</button>
+      <button id="editorRevealBtn" class="btn-accent-ghost" type="button">Открыть всем</button>
+      <button id="editorRedrawBtn" class="btn-ghost" type="button">Перегенерировать</button>
+      <button id="editorCloseBtn" class="btn-ghost" type="button">Закрыть</button>
+    </div>
+  </dialog>
+
   <canvas id="diceOverlay" aria-hidden="true" hidden></canvas>
 </body>
 </html>

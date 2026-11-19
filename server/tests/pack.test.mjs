@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CATEGORIES, DEFAULT_PACK, normalizePack, importBunkerOnline,
-  organizePack, drawCard, drawScenario
+  organizePack, drawCard, drawScenario, formatAge
 } from "../src/content.js";
 import { checkPack, convertPack, createTemplate } from "../../tools/pack.mjs";
 
@@ -48,6 +48,15 @@ test("single JSON v2 has meaningful sections", () => {
 });
 
 test("age, height, descriptions, custom categories and scenario render", () => {
+  assert.equal(formatAge(1), "1 год");
+  assert.equal(formatAge(2), "2 года");
+  assert.equal(formatAge(5), "5 лет");
+  assert.equal(formatAge(11), "11 лет");
+  assert.equal(formatAge(14), "14 лет");
+  assert.equal(formatAge(21), "21 год");
+  assert.equal(formatAge(24), "24 года");
+  assert.equal(formatAge(31), "31 год");
+  assert.equal(formatAge(42), "42 года");
   const pack = normalizePack({
     formatVersion: 2,
     meta: { name: "Test" },
@@ -60,17 +69,19 @@ test("age, height, descriptions, custom categories and scenario render", () => {
     customCategories: { relic: { label: "Реликвия", cards: [{ title: "Компас", tags: ["редкость"] }] } },
     world: {
       catastrophes: [{ title: "Сбой", description: "Связь нестабильна" }],
-      bunker: { location: ["Под горой"], supplies: ["Воды на 30 дней"] }
+      bunker: { location: ["Под горой"], supplies: ["Воды на 30 дней"] },
+      events: [{ title: "Сбой света", description: "Темно в коридоре" }]
     }
   });
   assert.equal(pack.categoryLabels.relic, "Реликвия");
   assert.ok(pack.categoryOrder.includes("relic"));
-  assert.equal(drawCard(pack, "gender").value, "Исследователь\n31 лет");
+  assert.equal(drawCard(pack, "gender").value, "Исследователь\n31 год");
   assert.equal(drawCard(pack, "body").value, "Подвижный\n170 см");
   assert.equal(drawCard(pack, "profession").value, "Штурман (Эксперт)\nЧитает карты");
   assert.equal(drawCard(pack, "hobby").value, "Садоводство (Любитель)");
   assert.equal(drawCard(pack, "profession").description, "Читает карты");
   assert.equal(pack.categories.relic[0].tags[0], "редкость");
+  assert.equal(pack.events[0].title, "Сбой света");
   const scenario = drawScenario(pack);
   assert.ok(scenario.catastrophe.includes("Связь нестабильна"));
   assert.ok(scenario.bunker.includes("Расположение: Под горой"));
