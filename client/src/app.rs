@@ -639,30 +639,50 @@ impl BunkerApp {
             let mut reconnect = false;
             let mut forget = false;
             ui.vertical_centered(|ui| {
-                ui.allocate_ui_with_layout(egui::vec2(card_w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.allocate_ui_with_layout(egui::vec2(card_w, 0.0), egui::Layout::top_down(egui::Align::Center), |ui| {
                     ui.set_width(card_w);
                     egui::Frame::new()
                         .fill(self.theme.palette.panel.color())
                         .stroke(Stroke::new(1.0_f32, self.theme.palette.outline.color()))
                         .corner_radius(6u8)
-                        .inner_margin(egui::Margin::symmetric(14, 10))
+                        .inner_margin(egui::Margin::symmetric(16, 14))
                         .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            ui.horizontal_wrapped(|ui| {
+                            let inner_w = (card_w - 32.0).max(200.0);
+                            ui.set_width(inner_w);
+                            ui.vertical_centered(|ui| {
                                 ui.label(
                                     FontWeight::SemiBold
                                         .text(self.theme.fonts.body, format!("Последняя комната: {}", saved.session.code))
                                         .color(self.theme.palette.accent_title.color()),
                                 );
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.add(animated_button(egui::Button::new("Сбросить"))).clicked() {
-                                        forget = true;
-                                    }
-                                    if ui.add_enabled(
-                                        self.pending.is_none() && self.room_deadline.is_none(),
-                                        animated_button(self.theme.accent_button("Вернуться в комнату")),
-                                    ).clicked() {
+                                ui.add_space(12.0);
+                                let btn_gap = 12.0;
+                                let btn_w = ((inner_w - btn_gap) * 0.5).clamp(120.0, 215.0);
+                                let btn_h = 38.0;
+                                let neutral = [self.theme.palette.button.color(); 2];
+                                let radius = self.theme.buttons.radius;
+                                let can_reconnect = self.pending.is_none() && self.room_deadline.is_none();
+                                centered_row(ui, btn_w * 2.0 + btn_gap, btn_h, |ui| {
+                                    ui.spacing_mut().item_spacing.x = btn_gap;
+                                    let rejoin_btn = egui::Button::new(
+                                        FontWeight::SemiBold
+                                            .text(self.theme.fonts.body - 1.0, "Вернуться в комнату")
+                                            .color(self.theme.palette.accent_text.color()),
+                                    );
+                                    if ui
+                                        .add_enabled_ui(can_reconnect, |ui| {
+                                            flat_button(ui, [btn_w, btn_h], rejoin_btn, self.theme.accent_gradient(), radius)
+                                        })
+                                        .inner
+                                        .clicked()
+                                    {
                                         reconnect = true;
+                                    }
+                                    let close_btn = egui::Button::new(
+                                        FontWeight::Medium.text(self.theme.fonts.body - 1.0, "Закрыть"),
+                                    );
+                                    if flat_button(ui, [btn_w, btn_h], close_btn, neutral, radius).clicked() {
+                                        forget = true;
                                     }
                                 });
                             });
@@ -677,7 +697,7 @@ impl BunkerApp {
                 self.connect_session(ui.ctx(), saved.session);
             } else if forget {
                 self.clear_saved_session();
-                self.notify("Сохранённая сессия сброшена");
+                self.notify("Окно последней комнаты закрыто");
             }
         }
     }
@@ -1036,10 +1056,26 @@ impl BunkerApp {
             egui::Area::new(egui::Id::new("host-panel-toggle"))
                 .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(16.0, -16.0))
                 .order(egui::Order::Foreground).movable(false).show(ctx, |ui| {
-                    let title = if self.show_host_tools { "Закрыть панель" } else { "Панель ведущего" };
-                    if ui.add(animated_button(self.theme.accent_button(title))).clicked() {
-                        self.show_host_tools = !self.show_host_tools;
-                    }
+                    let tooltip = if self.show_host_tools { "Закрыть панель ведущего" } else { "Панель ведущего" };
+                    let colors = if self.show_host_tools {
+                        self.theme.accent_gradient()
+                    } else {
+                        [self.theme.palette.button.color(); 2]
+                    };
+                    egui::Frame::new()
+                        .fill(self.theme.palette.panel.color().gamma_multiply(0.95))
+                        .stroke(Stroke::new(1.0_f32, self.theme.palette.outline.color()))
+                        .corner_radius(6u8)
+                        .inner_margin(egui::Margin::same(4))
+                        .show(ui, |ui| {
+                            let button = self.artwork.button(Icon::HostMenu, "☰", 20.0);
+                            if flat_button(ui, [36.0, 36.0], button, colors, self.theme.buttons.radius)
+                                .on_hover_text(tooltip)
+                                .clicked()
+                            {
+                                self.show_host_tools = !self.show_host_tools;
+                            }
+                        });
                 });
         }
     }
@@ -2265,6 +2301,7 @@ impl eframe::App for BunkerApp {
                                 .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
                                 .order(egui::Order::Foreground)
                                 .movable(false).show(ctx, |ui| {
+                                    let radius = self.theme.buttons.radius;
                                     if self.confirm_leave {
                                         egui::Frame::new()
                                             .fill(self.theme.palette.panel.color())
@@ -2272,27 +2309,64 @@ impl eframe::App for BunkerApp {
                                             .corner_radius(6u8)
                                             .inner_margin(egui::Margin::symmetric(10, 6))
                                             .show(ui, |ui| {
+                                                let btn_size = [32.0, 32.0];
+                                                ui.spacing_mut().interact_size.y = btn_size[1];
                                                 ui.horizontal(|ui| {
+                                                    ui.spacing_mut().item_spacing.x = 8.0;
                                                     ui.label(
                                                         FontWeight::SemiBold
                                                             .text(self.theme.fonts.small + 1.0, "Выйти из партии?")
                                                             .color(self.theme.palette.text.color()),
                                                     );
-                                                    let yes = egui::Button::new(
-                                                        FontWeight::SemiBold
-                                                            .text(self.theme.fonts.small + 1.0, "Да")
-                                                            .color(self.theme.palette.negative.color()),
-                                                    );
-                                                    if ui.add(animated_button(yes)).clicked() {
+                                                    let yes_btn = self.artwork.button(Icon::ConfirmYes, "✓", 18.0);
+                                                    if flat_button(
+                                                        ui,
+                                                        btn_size,
+                                                        yes_btn,
+                                                        [self.theme.palette.negative.color(); 2],
+                                                        radius,
+                                                    )
+                                                    .on_hover_text("Да, выйти в меню")
+                                                    .clicked()
+                                                    {
                                                         self.leave_room();
                                                     }
-                                                    if ui.add(animated_button(egui::Button::new("Нет"))).clicked() {
+                                                    let no_btn = self.artwork.button(Icon::ConfirmNo, "✕", 18.0);
+                                                    if flat_button(
+                                                        ui,
+                                                        btn_size,
+                                                        no_btn,
+                                                        [self.theme.palette.button.color(); 2],
+                                                        radius,
+                                                    )
+                                                    .on_hover_text("Нет, остаться")
+                                                    .clicked()
+                                                    {
                                                         self.confirm_leave = false;
                                                     }
                                                 });
                                             });
-                                    } else if ui.add(animated_button(egui::Button::new("В меню"))).clicked() {
-                                        self.confirm_leave = true;
+                                    } else {
+                                        egui::Frame::new()
+                                            .fill(self.theme.palette.panel.color().gamma_multiply(0.95))
+                                            .stroke(Stroke::new(1.0_f32, self.theme.palette.outline.color()))
+                                            .corner_radius(6u8)
+                                            .inner_margin(egui::Margin::same(4))
+                                            .show(ui, |ui| {
+                                                let menu_btn = self.artwork.button(Icon::LeaveMenu, "⎋", 20.0);
+                                                if flat_button(
+                                                    ui,
+                                                    [36.0, 36.0],
+                                                    menu_btn,
+                                                    [self.theme.palette.button.color(); 2],
+                                                    radius,
+                                                )
+                                                .on_hover_text("В меню")
+                                                .clicked()
+                                                {
+                                                    self.confirm_leave = true;
+                                                }
+                                            });
                                     }
                                 });
                         },
