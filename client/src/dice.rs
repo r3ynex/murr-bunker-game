@@ -182,15 +182,6 @@ impl V {
             Self(0.0, 0.0, 1.0)
         }
     }
-    fn rotate_euler(self, x: f32, y: f32, z: f32) -> Self {
-        let (sx, cx) = x.sin_cos();
-        let (sy, cy) = y.sin_cos();
-        let (sz, cz) = z.sin_cos();
-        let y1 = cx * self.1 - sx * self.2;
-        let z1 = sx * self.1 + cx * self.2;
-        let x2 = cy * self.0 + sy * z1;
-        Self(cz * x2 - sz * y1, sz * x2 + cz * y1, cy * z1 - sy * self.0)
-    }
     // Rodrigues' single-axis rotation: strictly unidirectional spin without gimbal wobble.
     fn rotate_axis(self, axis: Self, angle: f32) -> Self {
         let (s, c) = angle.sin_cos();
@@ -444,8 +435,7 @@ fn orientation(mesh: &DieMesh, value: u32, t: f32) -> impl Fn(V) -> V {
     let angle = remaining * TAU * 3.0;
     move |v: V| {
         let aligned = V(v.dot(right), v.dot(up), v.dot(normal));
-        let resting = aligned.rotate_euler(0.14, -0.18, 0.04);
-        resting.rotate_axis(spin_axis, angle)
+        aligned.rotate_axis(spin_axis, angle)
     }
 }
 
@@ -1311,12 +1301,19 @@ mod tests {
                     .unwrap();
                 assert_eq!(best.value, value, "Bundled GLB D{sides} landing on {value}");
 
-                // Verify the face's UV-up direction lands upright toward screen +Y.
+                // Verify the face lands squarely flat toward the viewer (+Z) and upright (+Y).
                 let fc = best.center.unwrap();
+                let fn_orig = best.normal.unwrap();
                 let fu = best.up.unwrap();
+                let normal_after = t(fc.plus(fn_orig.times(0.1))).minus(t(fc)).unit();
                 let up_after = t(fc.plus(fu.times(0.1))).minus(t(fc)).unit();
                 assert!(
-                    up_after.1 > 0.9,
+                    normal_after.2 > 0.999,
+                    "Bundled GLB D{sides} face {value} should land flat toward viewer (nz={})",
+                    normal_after.2
+                );
+                assert!(
+                    up_after.1 > 0.999,
                     "Bundled GLB D{sides} face {value} should land upright (up_y={})",
                     up_after.1
                 );

@@ -24,14 +24,6 @@ const color = (rgb, alpha = 1) => `rgba(${rgb.join(",")},${alpha})`;
 
 const SPIN_AXIS = unit([0.32, 0.92, 0.22]);
 
-function rotateEuler([x, y, z], rx, ry, rz) {
-  const sx = Math.sin(rx), cx = Math.cos(rx), sy = Math.sin(ry), cy = Math.cos(ry);
-  const sz = Math.sin(rz), cz = Math.cos(rz);
-  const y1 = cx * y - sx * z, z1 = sx * y + cx * z;
-  const x2 = cy * x + sy * z1;
-  return [cz * x2 - sz * y1, sz * x2 + cz * y1, cy * z1 - sy * x];
-}
-
 // Rodrigues' single-axis rotation: strictly unidirectional spin with zero gimbal wobble.
 function rotateAxis(v, axis, angle) {
   const c = Math.cos(angle);
@@ -61,13 +53,12 @@ function faceAnchor(mesh, face) {
 }
 
 function orientPoint(v, anchor, t) {
-  // Align winning face straight toward viewer (+Z), apply gentle 3D resting tilt,
-  // then spin monotonically in ONE direction around a fixed axis and settle cleanly at angle = 0.
+  // Align winning face flat toward viewer (+Z), then spin monotonically in ONE direction
+  // around a fixed 3D axis and settle squarely face-on at angle = 0.
   const aligned = [dot(v, anchor.right), dot(v, anchor.up), dot(v, anchor.normal)];
-  const resting = rotateEuler(aligned, 0.14, -0.18, 0.04);
   const remaining = (1 - clamp(t)) ** 3;
   const angle = remaining * Math.PI * 2 * 3;
-  return rotateAxis(resting, SPIN_AXIS, angle);
+  return rotateAxis(aligned, SPIN_AXIS, angle);
 }
 
 function fillPolygon(points, fill) {
