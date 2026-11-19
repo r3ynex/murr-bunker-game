@@ -70,17 +70,69 @@ function orientPoint(v, anchor, t) {
   return rotateAxis(resting, SPIN_AXIS, angle);
 }
 
-function polygon(points, fill, outline) {
+function fillPolygon(points, fill) {
   drawing.beginPath();
   points.forEach(([x, y], i) => i ? drawing.lineTo(x, y) : drawing.moveTo(x, y));
   drawing.closePath();
   drawing.fillStyle = fill;
   drawing.fill();
-  if (outline) {
-    drawing.strokeStyle = outline;
-    drawing.lineWidth = 1.2;
-    drawing.stroke();
-  }
+}
+
+function screenDoubleArea(p0, p1, p2) {
+  return (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]);
+}
+
+function drawTexturedTriangle(img, p0, p1, p2, uv0, uv1, uv2, opacity) {
+  const w = img.width;
+  const h = img.height;
+  const s0 = uv0[0] * w, t0 = uv0[1] * h;
+  const s1 = uv1[0] * w, t1 = uv1[1] * h;
+  const s2 = uv2[0] * w, t2 = uv2[1] * h;
+
+  const ds1 = s1 - s0, dt1 = t1 - t0;
+  const ds2 = s2 - s0, dt2 = t2 - t0;
+  const det = ds1 * dt2 - ds2 * dt1;
+  if (Math.abs(det) < 1e-6) return;
+  const inv = 1 / det;
+
+  const dx1 = p1[0] - p0[0], dy1 = p1[1] - p0[1];
+  const dx2 = p2[0] - p0[0], dy2 = p2[1] - p0[1];
+  const a = (dx1 * dt2 - dx2 * dt1) * inv;
+  const b = (dy1 * dt2 - dy2 * dt1) * inv;
+  const c = (dx2 * ds1 - dx1 * ds2) * inv;
+  const d = (dy2 * ds1 - dy1 * ds2) * inv;
+  const e = p0[0] - a * s0 - c * t0;
+  const f = p0[1] - b * s0 - d * t0;
+
+  // Slightly expand the clip triangle outward from its 2D centroid to prevent AA hairline seams.
+  const cx = (p0[0] + p1[0] + p2[0]) / 3;
+  const cy = (p0[1] + p1[1] + p2[1]) / 3;
+  const expand = p => {
+    const vx = p[0] - cx, vy = p[1] - cy;
+    const l = Math.hypot(vx, vy);
+    return l > 1e-4 ? [p[0] + (vx / l) * 0.45, p[1] + (vy / l) * 0.45] : p;
+  };
+  const e0 = expand(p0), e1 = expand(p1), e2 = expand(p2);
+
+  const sx = Math.max(0, Math.floor(Math.min(s0, s1, s2)) - 2);
+  const sy = Math.max(0, Math.floor(Math.min(t0, t1, t2)) - 2);
+  const sx2 = Math.min(w, Math.ceil(Math.max(s0, s1, s2)) + 2);
+  const sy2 = Math.min(h, Math.ceil(Math.max(t0, t1, t2)) + 2);
+  const sw = sx2 - sx;
+  const sh = sy2 - sy;
+  if (sw <= 0 || sh <= 0) return;
+
+  drawing.save();
+  drawing.globalAlpha = opacity;
+  drawing.beginPath();
+  drawing.moveTo(e0[0], e0[1]);
+  drawing.lineTo(e1[0], e1[1]);
+  drawing.lineTo(e2[0], e2[1]);
+  drawing.closePath();
+  drawing.clip();
+  drawing.transform(a, b, c, d, e, f);
+  drawing.drawImage(img, sx, sy, sw, sh, sx, sy, sw, sh);
+  drawing.restore();
 }
 
 function label(text, x, y, size, fill, bold = false) {
@@ -106,87 +158,124 @@ function drawDie(mesh, roll, x, y, radius, t, opacity) {
   const anchor = faceAnchor(mesh, targetFace);
   const transform = v => orientPoint(v, anchor, t);
   const vertices = mesh.vertices.map(transform);
-  const project = ([a, b, z]) => [x + a * radius * 3.8 / (3.8 - z), y - b * radius * 3.8 / (3.8 - z)];
+  const project = ([a, b, z]) => {
+    const denom = Math.max(0.5, 3.8 - z);
+    const lens = radius * 3.8 / denom;
+    return [x + a * lens, y - b * lens];
+  };
   const defaultBase = roll.sides === 6 ? [43, 120, 139] : [188, 112, 34];
   const light = unit([-0.44, 0.62, 0.80]);
 
   if (Array.isArray(mesh.triangles) && mesh.triangles.length > 0) {
-    // Render GLB / triangulated mesh with per-material base colors and winning face highlight.
+    const hasTextures = Array.isArray(mesh.textures) && mesh.textures.some(Boolean) && Array.isArray(mesh.uvs) && mesh.uvs.length === mesh.vertices.length;
+
+    if (hasTextures && Array.isArray(mesh.faceGroups) && mesh.faceGroups.length > 0) {
+      // Render textured faces back-to-front with ZERO strokes and ONE unified shading fill per face.
+      const visibleGroups = [];
+      for (const group of mesh.faceGroups) {
+        const fc = transform(group.center);
+        const fn = unit(sub(transform(add(group.center, mul(group.normal, 0.2))), fc));
+        if (dot(sub([0, 0, 3.8], fc), fn) <= 1e-4) continue;
+        visibleGroups.push({ group, z: fc[2], normal: fn });
+      }
+      visibleGroups.sort((a, b) => a.z - b.z);
+
+      for (const { group, normal } of visibleGroups) {
+        let drewAny = false;
+        for (const tri of group.subTriangles) {
+          const [i0, i1, i2] = tri.indices;
+          const p0 = project(vertices[i0]);
+          const p1 = project(vertices[i1]);
+          const p2 = project(vertices[i2]);
+          if (screenDoubleArea(p0, p1, p2) > -0.25) continue;
+          const img = tri.image !== null && tri.image !== undefined ? mesh.textures[tri.image] : null;
+          if (img) {
+            drawTexturedTriangle(img, p0, p1, p2, mesh.uvs[i0], mesh.uvs[i1], mesh.uvs[i2], opacity);
+            drewAny = true;
+          } else {
+            const strength = Math.min(1, 0.34 + Math.max(0, dot(normal, light)) * 0.72);
+            const base = tri.color || defaultBase;
+            fillPolygon([p0, p1, p2], color(base.map(c => Math.round(c * strength)), opacity));
+          }
+        }
+        // Apply unified diffuse shading once over the entire face boundary (no diagonal/sub-tri seams).
+        if (drewAny && group.boundary && group.boundary.length >= 3) {
+          const strength = Math.min(1, 0.64 + Math.max(0, dot(normal, light)) * 0.36);
+          const shadeAlpha = (1 - strength) * opacity;
+          if (shadeAlpha > 0.004) {
+            fillPolygon(group.boundary.map(idx => project(vertices[idx])), `rgba(0,0,0,${shadeAlpha.toFixed(4)})`);
+          }
+        }
+      }
+      // Textured models use only the model's own texture markings (no overlay numbers or pips).
+      return;
+    }
+
+    // Fallback for untextured triangulated GLB meshes: strokeless depth-sorted triangles.
     const visible = [];
     for (const tri of mesh.triangles) {
-      const a = vertices[tri.indices[0]];
-      const b = vertices[tri.indices[1]];
-      const c = vertices[tri.indices[2]];
+      const [i0, i1, i2] = tri.indices;
+      const a = vertices[i0], b = vertices[i1], c = vertices[i2];
       const center = mul(add(add(a, b), c), 1 / 3);
-      const normal = unit(cross(sub(b, a), sub(c, a)));
-      if (dot(sub([0, 0, 3.8], center), normal) > 0) {
-        visible.push({ points: [a, b, c], center, normal, face: tri.face, color: tri.color });
-      }
+      const crossN = cross(sub(b, a), sub(c, a));
+      if (len(crossN) <= 1e-7) continue;
+      const normal = unit(crossN);
+      if (dot(sub([0, 0, 3.8], center), normal) <= 1e-4) continue;
+      const p0 = project(a), p1 = project(b), p2 = project(c);
+      if (screenDoubleArea(p0, p1, p2) > -0.25) continue;
+      visible.push({ points: [p0, p1, p2], z: center[2], normal, color: tri.color });
     }
-    visible.sort((a, b) => a.center[2] - b.center[2]);
+    visible.sort((a, b) => a.z - b.z);
     for (const tri of visible) {
-      const front = tri.face === roll.value && t > 0.84;
       const strength = Math.min(1, 0.34 + Math.max(0, dot(tri.normal, light)) * 0.72);
       const base = tri.color || defaultBase;
-      const fill = color(base.map(c => Math.round(c * strength)), opacity);
-      const stroke = front ? color([255, 198, 108], 0.85 * opacity) : color(base.map(c => Math.round(c * strength * 0.82)), 0.45 * opacity);
-      polygon(tri.points.map(project), fill, stroke);
+      fillPolygon(tri.points, color(base.map(c => Math.round(c * strength)), opacity));
     }
-    // Draw crisp numbers/pips over flat numbered faces when the GLB face has <= 6 triangles.
-    for (const face of mesh.faces) {
-      if ((face.triCount ?? 0) > 6) continue;
-      const fa = faceAnchor(mesh, face);
-      const fc = transform(fa.center);
-      const fn = unit(sub(transform(add(fa.center, mul(fa.normal, 0.2))), fc));
-      if (fn[2] <= 0.18) continue;
-      const fr = unit(sub(transform(add(fa.center, mul(fa.right, 0.2))), fc));
-      const fu = unit(sub(transform(add(fa.center, mul(fa.up, 0.2))), fc));
-      const mark = color([255, 238, 200], opacity * (0.6 + 0.4 * clamp(fn[2])));
-      if (roll.sides === 6) {
+    if (roll.sides === 6) {
+      for (const face of mesh.faces) {
+        if ((face.triCount ?? 0) > 6) continue;
+        const fa = faceAnchor(mesh, face);
+        const fc = transform(fa.center);
+        const fn = unit(sub(transform(add(fa.center, mul(fa.normal, 0.2))), fc));
+        if (fn[2] <= 0.18) continue;
+        const fr = unit(sub(transform(add(fa.center, mul(fa.right, 0.2))), fc));
+        const fu = unit(sub(transform(add(fa.center, mul(fa.up, 0.2))), fc));
+        const mark = color([255, 238, 200], opacity * (0.6 + 0.4 * clamp(fn[2])));
         for (const [px, py] of pips(face.value)) {
           const mid = add(add(fc, mul(fr, px * 0.85)), mul(fu, py * 0.85));
           const perimeter = Array.from({ length: 12 }, (_, i) => {
             const angle = i * Math.PI / 6;
             return project(add(add(mid, mul(fr, Math.cos(angle) * 0.07)), mul(fu, Math.sin(angle) * 0.07)));
           });
-          polygon(perimeter, mark);
+          fillPolygon(perimeter, mark);
         }
-      } else {
-        const [cx, cy] = project(fc);
-        const text = [6, 9].includes(face.value) ? face.value + "." : face.value;
-        label(text, cx, cy, radius * 0.28 * (0.58 + fn[2] * 0.42), mark, true);
       }
     }
     return;
   }
 
+  // Legacy JSON polyhedron fallback (strokeless).
   const faces = mesh.faces.map(face => {
     const points = face.indices.map(index => vertices[index]);
     return { ...basis(points), points, value: face.value };
-  }).filter(face => dot(sub([0, 0, 3.8], face.center), face.normal) > 0)
+  }).filter(face => dot(sub([0, 0, 3.8], face.center), face.normal) > 1e-4)
     .sort((a, b) => a.center[2] - b.center[2]);
 
   for (const face of faces) {
-    const front = face.value === roll.value && t > 0.84;
     const strength = Math.min(1, 0.32 + Math.max(0, dot(face.normal, light)) * 0.73);
-    const edge = front ? color([255, 198, 108], 0.96 * opacity) : color([173, 166, 183], 0.57 * opacity);
     const shade = factor => color(defaultBase.map(c => Math.round(c * strength * factor)), opacity);
-    polygon(face.points.map(project), shade(0.54), edge);
-    polygon(face.points.map(p => project(add(face.center, mul(sub(p, face.center), 0.91)))), shade(1));
-    const mark = color([255, 238, 200], opacity * (0.57 + 0.43 * clamp(face.normal[2])));
+    fillPolygon(face.points.map(project), shade(0.62));
+    fillPolygon(face.points.map(p => project(add(face.center, mul(sub(p, face.center), 0.93)))), shade(1));
     if (roll.sides === 6) {
+      const mark = color([255, 238, 200], opacity * (0.57 + 0.43 * clamp(face.normal[2])));
       for (const [px, py] of pips(face.value)) {
         const mid = add(add(face.center, mul(face.right, px)), mul(face.up, py));
         const perimeter = Array.from({ length: 12 }, (_, i) => {
           const angle = i * Math.PI / 6;
           return project(add(add(mid, mul(face.right, Math.cos(angle) * 0.075)), mul(face.up, Math.sin(angle) * 0.075)));
         });
-        polygon(perimeter, mark);
+        fillPolygon(perimeter, mark);
       }
-    } else if (face.normal[2] > 0.15) {
-      const [cx, cy] = project(face.center);
-      const text = [6, 9].includes(face.value) ? face.value + "." : face.value;
-      label(text, cx, cy, radius * 0.3 * (0.56 + face.normal[2] * 0.44), mark, true);
     }
   }
 }
@@ -242,7 +331,82 @@ function linearToSrgbByte(c) {
   return Math.round(clamp(srgb) * 255);
 }
 
-function parseGlbBuffer(buffer, expectedSides) {
+function extractBoundaryLoop(tris) {
+  const edgeMap = new Map();
+  for (const tri of tris) {
+    const [a, b, c] = tri.indices;
+    for (const [u, v] of [[a, b], [b, c], [c, a]]) {
+      const rev = `${v}:${u}`;
+      if (edgeMap.has(rev)) {
+        edgeMap.delete(rev);
+      } else {
+        edgeMap.set(`${u}:${v}`, [u, v]);
+      }
+    }
+  }
+  const nextByStart = new Map();
+  for (const [u, v] of edgeMap.values()) {
+    if (!nextByStart.has(u)) nextByStart.set(u, v);
+  }
+  const first = nextByStart.keys().next().value;
+  if (first === undefined) return null;
+  const loop = [first];
+  let curr = nextByStart.get(first);
+  const limit = nextByStart.size + 1;
+  while (curr !== undefined && curr !== first && loop.length <= limit) {
+    loop.push(curr);
+    curr = nextByStart.get(curr);
+  }
+  return curr === first && loop.length >= 3 ? loop : null;
+}
+
+function subdivideTriangles(vertices, uvs, triangles, levels) {
+  let tris = triangles;
+  for (let lvl = 0; lvl < levels; lvl++) {
+    const next = [];
+    const midCache = new Map();
+    const midpoint = (a, b) => {
+      const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+      if (midCache.has(key)) return midCache.get(key);
+      const idx = vertices.length;
+      vertices.push(mul(add(vertices[a], vertices[b]), 0.5));
+      uvs.push([(uvs[a][0] + uvs[b][0]) * 0.5, (uvs[a][1] + uvs[b][1]) * 0.5]);
+      midCache.set(key, idx);
+      return idx;
+    };
+    for (const tri of tris) {
+      const [i0, i1, i2] = tri.indices;
+      const m01 = midpoint(i0, i1);
+      const m12 = midpoint(i1, i2);
+      const m20 = midpoint(i2, i0);
+      for (const indices of [[i0, m01, m20], [m01, i1, m12], [m20, m12, i2], [m01, m12, m20]]) {
+        next.push({ indices, face: tri.face, color: tri.color, image: tri.image });
+      }
+    }
+    tris = next;
+  }
+  return tris;
+}
+
+async function decodeEmbeddedImage(bytes, mimeType) {
+  const blob = new Blob([bytes], { type: mimeType || "image/png" });
+  if (typeof createImageBitmap === "function") {
+    try {
+      return await createImageBitmap(blob);
+    } catch {
+      // Fall back to HTMLImageElement below.
+    }
+  }
+  return await new Promise(resolve => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+    img.src = url;
+  });
+}
+
+async function parseGlbBuffer(buffer, expectedSides) {
   const buf = new Uint8Array(buffer);
   if (buf.byteLength < 20) return null;
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
@@ -273,6 +437,19 @@ function parseGlbBuffer(buffer, expectedSides) {
     }
     return out;
   };
+  const readUv = idx => {
+    const acc = gltf.accessors?.[idx];
+    const bv = gltf.bufferViews?.[acc?.bufferView];
+    if (!acc || !bv || acc.componentType !== 5126 || acc.type !== "VEC2") return null;
+    const stride = bv.byteStride || 8;
+    const base = (bv.byteOffset || 0) + (acc.byteOffset || 0);
+    const out = [];
+    for (let i = 0; i < acc.count; i++) {
+      const o = base + i * stride;
+      out.push([binView.getFloat32(o, true), binView.getFloat32(o + 4, true)]);
+    }
+    return out;
+  };
   const readIdx = idx => {
     const acc = gltf.accessors?.[idx];
     const bv = gltf.bufferViews?.[acc?.bufferView];
@@ -287,10 +464,19 @@ function parseGlbBuffer(buffer, expectedSides) {
     return out;
   };
 
+  // Extract embedded binary images referenced by glTF images[].bufferView.
+  const rawImages = (gltf.images ?? []).map(img => {
+    const bv = img?.bufferView !== undefined ? gltf.bufferViews?.[img.bufferView] : null;
+    if (!bv) return null;
+    const start = bv.byteOffset || 0;
+    const bytes = bin.slice(start, start + bv.byteLength);
+    return { bytes, mimeType: img.mimeType || "image/png" };
+  });
+
   const nodes = gltf.nodes ?? [];
   const children = new Set(nodes.flatMap(n => n.children ?? []));
   const roots = gltf.scenes?.[gltf.scene ?? 0]?.nodes ?? nodes.map((_, i) => i).filter(i => !children.has(i));
-  const vertices = [], rawTris = [];
+  const vertices = [], uvs = [], rawTris = [];
 
   const visit = (nodeIdx, parent) => {
     const node = nodes[nodeIdx];
@@ -300,15 +486,26 @@ function parseGlbBuffer(buffer, expectedSides) {
       for (const prim of gltf.meshes?.[node.mesh]?.primitives ?? []) {
         if ((prim.mode !== undefined && prim.mode !== 4) || prim.attributes?.POSITION === undefined) continue;
         const pos = readPos(prim.attributes.POSITION);
+        const primUvs = prim.attributes.TEXCOORD_0 !== undefined ? readUv(prim.attributes.TEXCOORD_0) : null;
+        const validUvs = primUvs && primUvs.length === pos.length ? primUvs : null;
         const baseV = vertices.length;
-        for (const p of pos) vertices.push(transformPoint(world, p));
+        for (let k = 0; k < pos.length; k++) {
+          vertices.push(transformPoint(world, pos[k]));
+          uvs.push(validUvs ? validUvs[k] : [0, 0]);
+        }
         const idx = prim.indices !== undefined ? readIdx(prim.indices) : pos.map((_, i) => i);
         const mat = prim.material !== undefined ? gltf.materials?.[prim.material] : null;
         const face = parseFaceMaterialName(mat?.name ?? "");
-        const bc = mat?.pbrMetallicRoughness?.baseColorFactor;
+        const pbr = mat?.pbrMetallicRoughness;
+        const bc = pbr?.baseColorFactor;
         const rgb = Array.isArray(bc) && bc.length >= 3 ? [linearToSrgbByte(bc[0]), linearToSrgbByte(bc[1]), linearToSrgbByte(bc[2])] : null;
+        let image = null;
+        if (validUvs && pbr?.baseColorTexture?.index !== undefined) {
+          const src = gltf.textures?.[pbr.baseColorTexture.index]?.source;
+          if (src !== undefined && rawImages[src]) image = src;
+        }
         for (let i = 0; i + 2 < idx.length; i += 3) {
-          rawTris.push({ i: [baseV + idx[i], baseV + idx[i + 1], baseV + idx[i + 2]], face, color: rgb });
+          rawTris.push({ i: [baseV + idx[i], baseV + idx[i + 1], baseV + idx[i + 2]], face, color: rgb, image });
         }
       }
     }
@@ -334,7 +531,7 @@ function parseGlbBuffer(buffer, expectedSides) {
   for (let val = 1; val <= expectedSides; val++) {
     const tris = byFace.get(val);
     if (!tris?.length) return null;
-    let nSum = [0, 0, 0], cSum = [0, 0, 0], aSum = 0;
+    let nSum = [0, 0, 0], cSum = [0, 0, 0], tSum = [0, 0, 0], aSum = 0;
     for (const tri of tris) {
       const a = vertices[tri.i[0]], b = vertices[tri.i[1]], c = vertices[tri.i[2]];
       const n = cross(sub(b, a), sub(c, a));
@@ -344,22 +541,72 @@ function parseGlbBuffer(buffer, expectedSides) {
       nSum = add(nSum, dot(n, m) >= 0 ? n : mul(n, -1));
       cSum = add(cSum, mul(m, area));
       aSum += area;
+
+      // Derive face right axis from UV +u tangent (dP/du) so textured faces land upright.
+      const uv0 = uvs[tri.i[0]], uv1 = uvs[tri.i[1]], uv2 = uvs[tri.i[2]];
+      const du1 = uv1[0] - uv0[0], dv1 = uv1[1] - uv0[1];
+      const du2 = uv2[0] - uv0[0], dv2 = uv2[1] - uv0[1];
+      const det = du1 * dv2 - du2 * dv1;
+      if (Math.abs(det) > 1e-8) {
+        const dp1 = sub(b, a), dp2 = sub(c, a);
+        const tangent = mul(sub(mul(dp1, dv2), mul(dp2, dv1)), 1 / det);
+        if (len(tangent) > 1e-8) tSum = add(tSum, mul(unit(tangent), area));
+      }
     }
     const normal = unit(nSum);
     const center = aSum > 1e-8 ? mul(cSum, 1 / aSum) : [0, 0, 0];
-    const ref = Math.abs(normal[1]) < 0.9 ? [0, 1, 0] : [0, 0, 1];
-    const right = unit(cross(ref, normal));
+    const tProj = sub(tSum, mul(normal, dot(tSum, normal)));
+    let right;
+    if (len(tProj) > 1e-5) {
+      right = unit(tProj);
+    } else {
+      const ref = Math.abs(normal[1]) < 0.9 ? [0, 1, 0] : [0, 0, 1];
+      right = unit(cross(ref, normal));
+    }
     const up = unit(cross(normal, right));
     faces.push({ value: val, center, normal, right, up, triCount: tris.length });
   }
-  const triangles = rawTris.map(tri => {
+
+  const orientedTris = rawTris.map(tri => {
     const [i0, i1, i2] = tri.i;
     const a = vertices[i0], b = vertices[i1], c = vertices[i2];
     const n = cross(sub(b, a), sub(c, a));
     const m = mul(add(add(a, b), c), 1 / 3);
-    return { indices: dot(n, m) >= 0 ? [i0, i1, i2] : [i0, i2, i1], face: tri.face, color: tri.color };
+    return { indices: dot(n, m) >= 0 ? [i0, i1, i2] : [i0, i2, i1], face: tri.face, color: tri.color, image: tri.image };
   });
-  return { vertices, faces, triangles };
+
+  const hasAnyTexture = orientedTris.some(t => t.image !== null);
+  const textures = hasAnyTexture
+    ? await Promise.all(rawImages.map(img => (img ? decodeEmbeddedImage(img.bytes, img.mimeType) : null)))
+    : [];
+
+  let triangles = orientedTris;
+  let faceGroups = null;
+  if (hasAnyTexture && textures.some(Boolean)) {
+    const levels = orientedTris.length <= 16 ? 2 : orientedTris.length <= 40 ? 1 : 0;
+    const origByFace = new Map();
+    for (const tri of orientedTris) {
+      const key = tri.face ?? -1;
+      if (!origByFace.has(key)) origByFace.set(key, []);
+      origByFace.get(key).push(tri);
+    }
+    triangles = levels > 0 ? subdivideTriangles(vertices, uvs, orientedTris, levels) : orientedTris;
+    const subByFace = new Map();
+    for (const tri of triangles) {
+      const key = tri.face ?? -1;
+      if (!subByFace.has(key)) subByFace.set(key, []);
+      subByFace.get(key).push(tri);
+    }
+    faceGroups = faces.map(face => ({
+      value: face.value,
+      center: face.center,
+      normal: face.normal,
+      boundary: extractBoundaryLoop(origByFace.get(face.value) ?? []),
+      subTriangles: subByFace.get(face.value) ?? [],
+    }));
+  }
+
+  return { vertices, uvs, faces, triangles, textures, faceGroups };
 }
 
 async function tryLoadGlb(urls, sides) {
@@ -367,7 +614,7 @@ async function tryLoadGlb(urls, sides) {
     try {
       const res = await fetch(url);
       if (!res.ok) continue;
-      const parsed = parseGlbBuffer(await res.arrayBuffer(), sides);
+      const parsed = await parseGlbBuffer(await res.arrayBuffer(), sides);
       if (parsed) return parsed;
     } catch {
       // Optional GLB override; fall back cleanly.

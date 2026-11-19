@@ -1,14 +1,16 @@
 use crate::appearance::{FontWeight, Theme};
 use crate::motion::animated_button;
-use eframe::egui::{self, Align2, Color32, Painter, Pos2, Shape, Stroke, Vec2};
+use eframe::egui::{self, Align2, Color32, Painter, Pos2, Shape, Stroke, TextureId, Vec2};
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::f32::consts::{PI, TAU};
 use std::io::Read;
 use std::time::{Duration, Instant};
 
 const MESHES: &str = include_str!("../../web/dice-models.json");
+const BUNDLED_D6_GLB: &[u8] = include_bytes!("../../d6.glb");
+const BUNDLED_D20_GLB: &[u8] = include_bytes!("../../d20.glb");
 const GLB_MAGIC: u32 = 0x4654_6C67; // "glTF"
 const CHUNK_JSON: u32 = 0x4E4F_534A; // "JSON"
 const CHUNK_BIN: u32 = 0x004E_4942; // "BIN\0"
@@ -73,16 +75,16 @@ impl DiceOverlay {
         self.active = Some((roll.clone(), start));
     }
 
-    pub fn show(&self, ctx: &egui::Context, theme: &Theme) {
-        let Some((roll, start)) = &self.active else {
+    pub fn show(&mut self, ctx: &egui::Context, theme: &Theme) {
+        let Some((roll, start)) = self.active.clone() else {
             return;
         };
         let now = Instant::now();
-        if now < *start {
-            ctx.request_repaint_after(*start - now);
+        if now < start {
+            ctx.request_repaint_after(start - now);
             return;
         }
-        let elapsed = now.duration_since(*start).as_secs_f32() * 1000.0;
+        let elapsed = now.duration_since(start).as_secs_f32() * 1000.0;
         if elapsed >= roll.duration_ms as f32 {
             return;
         }
@@ -99,18 +101,19 @@ impl DiceOverlay {
             egui::lerp((scene.bottom() + radius * 1.6)..=stop.y, flight)
                 - (PI * flight).sin() * radius * 0.38,
         );
-        let mesh = if roll.sides == 6 {
-            &self.meshes.d6
+        let (mesh, label_prefix) = if roll.sides == 6 {
+            (&mut self.meshes.d6, "dice-d6")
         } else {
-            &self.meshes.d20
+            (&mut self.meshes.d20, "dice-d20")
         };
+        mesh.ensure_textures(ctx, label_prefix);
         let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("dice-animation"));
         ctx.move_to_top(layer);
         let mut painter = ctx.layer_painter(layer);
         painter.set_clip_rect(scene);
         painter.rect_filled(scene, 0u8, Color32::from_black_alpha((216.0 * fade) as u8));
         paint_glow(&painter, stop, radius * 1.95, roll.sides, fade);
-        paint_die(&painter, theme, mesh, roll, center, radius, t, fade);
+        paint_die(&painter, theme, mesh, &roll, center, radius, t, fade);
         let caption = format!("{}  ·  D{}", roll.player, roll.sides);
         painter.text(
             stop + Vec2::new(0.0, radius * 1.19),
@@ -199,6 +202,12 @@ impl V {
     }
 }
 
+struct EmbeddedTexture {
+    bytes: Vec<u8>,
+    handle: Option<egui::TextureHandle>,
+    failed: bool,
+}
+
 #[derive(Deserialize)]
 struct Meshes {
     d6: DieMesh,
@@ -208,9 +217,13 @@ struct Meshes {
 #[derive(Deserialize)]
 struct DieMesh {
     vertices: Vec<V>,
+    #[serde(default)]
+    uvs: Vec<[f32; 2]>,
     faces: Vec<Face>,
     #[serde(default)]
     triangles: Vec<MeshTriangle>,
+    #[serde(skip)]
+    textures: Vec<EmbeddedTexture>,
 }
 
 #[derive(Deserialize)]
@@ -230,22 +243,28 @@ struct Face {
     tri_count: usize,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct MeshTriangle {
     indices: [usize; 3],
     #[serde(default)]
     face: Option<u32>,
     #[serde(default)]
     color: Option<[u8; 3]>,
+    #[serde(default)]
+    image: Option<usize>,
 }
 
 impl Meshes {
     fn load() -> Self {
         let mut meshes = Self::load_json();
-        if let Some(d6) = load_glb_file(&["d6.glb", "assets/dice/d6.glb"], 6) {
+        if let Some(d6) = load_glb_file(&["d6.glb", "assets/dice/d6.glb"], 6)
+            .or_else(|| parse_glb(BUNDLED_D6_GLB, 6))
+        {
             meshes.d6 = d6;
         }
-        if let Some(d20) = load_glb_file(&["d20.glb", "assets/dice/d20.glb"], 20) {
+        if let Some(d20) = load_glb_file(&["d20.glb", "assets/dice/d20.glb"], 20)
+            .or_else(|| parse_glb(BUNDLED_D20_GLB, 20))
+        {
             meshes.d20 = d20;
         }
         meshes
@@ -270,6 +289,40 @@ impl Meshes {
 }
 
 impl DieMesh {
+    fn ensure_textures(&mut self, ctx: &egui::Context, prefix: &str) {
+        for (idx, tex) in self.textures.iter_mut().enumerate() {
+            if tex.handle.is_some() || tex.failed || tex.bytes.is_empty() {
+                continue;
+            }
+            match image::load_from_memory(&tex.bytes) {
+                Ok(img) => {
+                    let rgba = img.to_rgba8();
+                    let size = [rgba.width() as usize, rgba.height() as usize];
+                    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                    let handle = ctx.load_texture(
+                        format!("{prefix}-tex-{idx}"),
+                        color_image,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    tex.handle = Some(handle);
+                }
+                Err(_) => {
+                    tex.failed = true;
+                }
+            }
+        }
+    }
+
+    fn has_loaded_texture(&self) -> bool {
+        self.textures.iter().any(|t| t.handle.is_some())
+    }
+
+    fn texture_id(&self, idx: Option<usize>) -> Option<TextureId> {
+        idx.and_then(|i| self.textures.get(i))
+            .and_then(|t| t.handle.as_ref())
+            .map(|h| h.id())
+    }
+
     fn valid(&self, sides: u32, corners: usize) -> bool {
         if self.faces.len() != sides as usize || self.vertices.is_empty() {
             return false;
@@ -347,18 +400,19 @@ fn face_basis(vertices: &[V], face: &Face) -> (V, V, V, V) {
 fn smooth(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
+
 fn tint(color: Color32, opacity: f32) -> Color32 {
     color.gamma_multiply(opacity)
 }
 
 fn shade(color: Color32, light: f32, opacity: f32) -> Color32 {
     let channel = |value| (f32::from(value) * light).clamp(0.0, 255.0).round() as u8;
-    Color32::from_rgba_unmultiplied(
+    Color32::from_rgb(
         channel(color.r()),
         channel(color.g()),
         channel(color.b()),
-        (opacity * 255.0) as u8,
     )
+    .gamma_multiply(opacity)
 }
 
 fn paint_glow(painter: &Painter, center: Pos2, radius: f32, sides: u32, opacity: f32) {
@@ -395,6 +449,10 @@ fn orientation(mesh: &DieMesh, value: u32, t: f32) -> impl Fn(V) -> V {
     }
 }
 
+fn screen_double_area(a: Pos2, b: Pos2, c: Pos2) -> f32 {
+    (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+}
+
 fn paint_die(
     painter: &Painter,
     _theme: &Theme,
@@ -407,7 +465,7 @@ fn paint_die(
 ) {
     let transform = orientation(mesh, roll.value, t);
     let project = |p: V| {
-        let lens = radius * 3.8 / (3.8 - p.2);
+        let lens = radius * 3.8 / (3.8 - p.2).max(0.5);
         center + Vec2::new(p.0, -p.1) * lens
     };
     let vertices: Vec<_> = mesh.vertices.iter().copied().map(&transform).collect();
@@ -419,57 +477,114 @@ fn paint_die(
     };
 
     if !mesh.triangles.is_empty() {
+        let has_uvs = mesh.uvs.len() == mesh.vertices.len();
         let mut visible: Vec<_> = mesh
             .triangles
             .iter()
             .filter_map(|tri| {
-                let a = vertices[tri.indices[0]];
-                let b = vertices[tri.indices[1]];
-                let c = vertices[tri.indices[2]];
+                let [i0, i1, i2] = tri.indices;
+                let (a, b, c) = (vertices[i0], vertices[i1], vertices[i2]);
                 let mid = a.plus(b).plus(c).times(1.0 / 3.0);
-                let normal = b.minus(a).cross(c.minus(a)).unit();
+                let cross_n = b.minus(a).cross(c.minus(a));
+                if cross_n.len() <= 1e-7 {
+                    return None;
+                }
+                let normal = cross_n.unit();
                 let towards = V(0.0, 0.0, 3.8).minus(mid).dot(normal);
-                (towards > 0.0).then_some((tri, [a, b, c], mid, normal))
+                if towards <= 1e-4 {
+                    return None;
+                }
+                let pa = project(a);
+                let pb = project(b);
+                let pc = project(c);
+                // Screen Y is downward, so outward CCW 3D triangles have negative 2D signed area.
+                // Skipping grazing / sliver triangles prevents projection artifacts.
+                if screen_double_area(pa, pb, pc) > -0.25 {
+                    return None;
+                }
+                Some((tri, [pa, pb, pc], mid.2, normal))
             })
             .collect();
-        visible.sort_by(|a, b| a.2 .2.total_cmp(&b.2 .2));
+        visible.sort_by(|a, b| a.2.total_cmp(&b.2));
+
+        // Batch triangles into textured egui::Mesh shapes with ZERO strokes
+        // (no wireframe mesh lines and no acute-angle miter spikes).
+        let mut current_tex: Option<TextureId> = None;
+        let mut batch = egui::Mesh::default();
+        let flush = |painter: &Painter, batch: &mut egui::Mesh| {
+            if !batch.indices.is_empty() {
+                painter.add(Shape::mesh(std::mem::take(batch)));
+            }
+        };
+
         for (tri, pts, _, normal) in visible {
-            let front = tri.face == Some(roll.value) && t > 0.84;
-            let strength = (0.34 + normal.dot(light).max(0.0) * 0.72).min(1.0);
-            let base = tri
-                .color
-                .map(|[r, g, b]| Color32::from_rgb(r, g, b))
-                .unwrap_or(default_base);
-            let stroke_color = if front {
-                tint(Color32::from_rgb(255, 198, 108), opacity * 0.85)
+            let tex_id = if has_uvs {
+                mesh.texture_id(tri.image)
             } else {
-                shade(base, strength * 0.82, opacity * 0.45)
+                None
             };
-            let corners = pts.into_iter().map(project).collect();
-            painter.add(Shape::convex_polygon(
-                corners,
-                shade(base, strength, opacity),
-                Stroke::new(1.0_f32, stroke_color),
-            ));
+            let target_tex = tex_id.unwrap_or_default();
+            if current_tex != Some(target_tex) {
+                flush(painter, &mut batch);
+                batch = egui::Mesh::with_texture(target_tex);
+                current_tex = Some(target_tex);
+            }
+
+            let lit_color = if tex_id.is_some() {
+                // Keep embedded white/orange/black textures crisp with clear 3D facet depth.
+                let strength = (0.64 + normal.dot(light).max(0.0) * 0.36).min(1.0);
+                let l = (strength * 255.0).round() as u8;
+                Color32::from_rgb(l, l, l).gamma_multiply(opacity)
+            } else {
+                let strength = (0.34 + normal.dot(light).max(0.0) * 0.72).min(1.0);
+                let base = tri
+                    .color
+                    .map(|[r, g, b]| Color32::from_rgb(r, g, b))
+                    .unwrap_or(default_base);
+                shade(base, strength, opacity)
+            };
+
+            let base_idx = batch.vertices.len() as u32;
+            for k in 0..3 {
+                let uv = if tex_id.is_some() {
+                    let [u, v] = mesh.uvs[tri.indices[k]];
+                    Pos2::new(u, v)
+                } else {
+                    egui::epaint::WHITE_UV
+                };
+                batch.vertices.push(egui::epaint::Vertex {
+                    pos: pts[k],
+                    uv,
+                    color: lit_color,
+                });
+            }
+            batch.add_triangle(base_idx, base_idx + 1, base_idx + 2);
         }
-        // Draw crisp numbers/pips on flat GLB faces (<= 6 triangles per face).
-        for face in &mesh.faces {
-            if face.tri_count > 6 {
-                continue;
-            }
-            let (fc_orig, fn_orig, fr_orig, fu_orig) = face_anchor(&mesh.vertices, face);
-            let fc = transform(fc_orig);
-            let fn_now = transform(fc_orig.plus(fn_orig.times(0.2))).minus(fc).unit();
-            if fn_now.2 <= 0.18 {
-                continue;
-            }
-            let fr_now = transform(fc_orig.plus(fr_orig.times(0.2))).minus(fc).unit();
-            let fu_now = transform(fc_orig.plus(fu_orig.times(0.2))).minus(fc).unit();
-            let mark = tint(
-                Color32::from_rgb(255, 238, 200),
-                opacity * (0.60 + 0.40 * fn_now.2.clamp(0.0, 1.0)),
-            );
-            if roll.sides == 6 {
+        flush(painter, &mut batch);
+
+        // When the model uses its own embedded textures, never draw overlay numbers or pips.
+        if mesh.has_loaded_texture() {
+            return;
+        }
+
+        // Legacy untextured GLB fallback: draw procedural pips on D6 only (no D20 overlay).
+        if roll.sides == 6 {
+            for face in &mesh.faces {
+                if face.tri_count > 6 {
+                    continue;
+                }
+                let (fc_orig, fn_orig, fr_orig, fu_orig) = face_anchor(&mesh.vertices, face);
+                let fc = transform(fc_orig);
+                let fn_now = transform(fc_orig.plus(fn_orig.times(0.2))).minus(fc).unit();
+                if fn_now.2 <= 0.18 {
+                    continue;
+                }
+                let fr_now = transform(fc_orig.plus(fr_orig.times(0.2))).minus(fc).unit();
+                let fu_now = transform(fc_orig.plus(fu_orig.times(0.2))).minus(fc).unit();
+                let mark = tint(
+                    Color32::from_rgb(255, 238, 200),
+                    opacity * (0.60 + 0.40 * fn_now.2.clamp(0.0, 1.0)),
+                );
                 paint_pips(
                     painter,
                     face.value,
@@ -479,78 +594,46 @@ fn paint_die(
                     project,
                     mark,
                 );
-            } else {
-                let caption = if matches!(face.value, 6 | 9) {
-                    format!("{}.", face.value)
-                } else {
-                    face.value.to_string()
-                };
-                painter.text(
-                    project(fc),
-                    Align2::CENTER_CENTER,
-                    caption,
-                    FontWeight::Bold.font(radius * 0.28 * (0.58 + fn_now.2 * 0.42)),
-                    mark,
-                );
             }
         }
         return;
     }
 
+    // Legacy JSON polyhedron fallback (used only if GLB files cannot be parsed).
     let mut visible: Vec<_> = mesh
         .faces
         .iter()
         .filter_map(|face| {
             let (mid, normal, right, up) = face_basis(&vertices, face);
             let towards_camera = V(0.0, 0.0, 3.8).minus(mid).dot(normal);
-            (towards_camera > 0.0).then_some((face, mid, normal, right, up))
+            (towards_camera > 1e-4).then_some((face, mid, normal, right, up))
         })
         .collect();
     visible.sort_by(|a, b| a.1 .2.total_cmp(&b.1 .2));
     for (face, mid, normal, right, up) in visible {
-        let front = face.value == roll.value && t > 0.84;
         let strength = (0.32 + normal.dot(light).max(0.0) * 0.73).min(1.0);
-        let highlight = if front {
-            Color32::from_rgb(255, 198, 108)
-        } else {
-            Color32::from_rgb(173, 166, 183)
-        };
-        let outline = tint(highlight, opacity * if front { 0.96 } else { 0.57 });
         let corners = face.indices.iter().map(|&i| project(vertices[i])).collect();
         painter.add(Shape::convex_polygon(
             corners,
-            shade(default_base, strength * 0.54, opacity),
-            Stroke::new(1.2_f32, outline),
+            shade(default_base, strength * 0.62, opacity),
+            Stroke::NONE,
         ));
         let inside = face
             .indices
             .iter()
-            .map(|&i| project(mid.plus(vertices[i].minus(mid).times(0.91))))
+            .map(|&i| project(mid.plus(vertices[i].minus(mid).times(0.93))))
             .collect();
         painter.add(Shape::convex_polygon(
             inside,
             shade(default_base, strength, opacity),
             Stroke::NONE,
         ));
-        let mark = tint(
-            Color32::from_rgb(255, 238, 200),
-            opacity * (0.57 + 0.43 * normal.2.clamp(0.0, 1.0)),
-        );
         if roll.sides == 6 {
-            paint_pips(painter, face.value, mid, right, up, project, mark);
-        } else if normal.2 > 0.15 {
-            let caption = if matches!(face.value, 6 | 9) {
-                format!("{}.", face.value)
-            } else {
-                face.value.to_string()
-            };
-            painter.text(
-                project(mid),
-                Align2::CENTER_CENTER,
-                caption,
-                FontWeight::Bold.font(radius * 0.30 * (0.56 + normal.2 * 0.44)),
-                mark,
+            let mark = tint(
+                Color32::from_rgb(255, 238, 200),
+                opacity * (0.57 + 0.43 * normal.2.clamp(0.0, 1.0)),
             );
+            paint_pips(painter, face.value, mid, right, up, project, mark);
         }
     }
 }
@@ -706,6 +789,53 @@ fn transform_point(m: &[f32; 16], p: V) -> V {
     )
 }
 
+fn subdivide_mesh(
+    vertices: &mut Vec<V>,
+    uvs: &mut Vec<[f32; 2]>,
+    triangles: Vec<MeshTriangle>,
+    levels: usize,
+) -> Vec<MeshTriangle> {
+    let mut tris = triangles;
+    for _ in 0..levels {
+        let mut next = Vec::with_capacity(tris.len() * 4);
+        let mut edge_midpoints: HashMap<(usize, usize), usize> = HashMap::new();
+        let mut midpoint = |a: usize, b: usize, verts: &mut Vec<V>, uvs: &mut Vec<[f32; 2]>| {
+            let key = if a < b { (a, b) } else { (b, a) };
+            if let Some(&idx) = edge_midpoints.get(&key) {
+                return idx;
+            }
+            let idx = verts.len();
+            verts.push(verts[a].plus(verts[b]).times(0.5));
+            let [ua, va] = uvs[a];
+            let [ub, vb] = uvs[b];
+            uvs.push([(ua + ub) * 0.5, (va + vb) * 0.5]);
+            edge_midpoints.insert(key, idx);
+            idx
+        };
+        for tri in tris {
+            let [i0, i1, i2] = tri.indices;
+            let m01 = midpoint(i0, i1, vertices, uvs);
+            let m12 = midpoint(i1, i2, vertices, uvs);
+            let m20 = midpoint(i2, i0, vertices, uvs);
+            for indices in [
+                [i0, m01, m20],
+                [m01, i1, m12],
+                [m20, m12, i2],
+                [m01, m12, m20],
+            ] {
+                next.push(MeshTriangle {
+                    indices,
+                    face: tri.face,
+                    color: tri.color,
+                    image: tri.image,
+                });
+            }
+        }
+        tris = next;
+    }
+    tris
+}
+
 fn parse_glb(bytes: &[u8], expected_sides: u32) -> Option<DieMesh> {
     if bytes.len() < 20 || read_u32_le(bytes, 0)? != GLB_MAGIC || read_u32_le(bytes, 4)? != 2 {
         return None;
@@ -730,7 +860,30 @@ fn parse_glb(bytes: &[u8], expected_sides: u32) -> Option<DieMesh> {
     let views = gltf.get("bufferViews")?.as_array()?;
     let meshes = gltf.get("meshes")?.as_array()?;
     let materials = gltf.get("materials").and_then(Value::as_array);
+    let gltf_textures = gltf.get("textures").and_then(Value::as_array);
+    let gltf_images = gltf.get("images").and_then(Value::as_array);
     let nodes = gltf.get("nodes").and_then(Value::as_array)?;
+
+    // Extract embedded binary images referenced via bufferView.
+    let mut textures = Vec::new();
+    if let Some(images) = gltf_images {
+        for img in images {
+            let bytes_opt = img
+                .get("bufferView")
+                .and_then(Value::as_u64)
+                .and_then(|idx| views.get(idx as usize))
+                .and_then(|bv| {
+                    let start = bv.get("byteOffset").and_then(Value::as_u64).unwrap_or(0) as usize;
+                    let len = bv.get("byteLength").and_then(Value::as_u64)? as usize;
+                    bin.get(start..start + len).map(|s| s.to_vec())
+                });
+            textures.push(EmbeddedTexture {
+                bytes: bytes_opt.unwrap_or_default(),
+                handle: None,
+                failed: false,
+            });
+        }
+    }
 
     let read_pos = |idx: usize| -> Option<Vec<V>> {
         let acc = accessors.get(idx)?;
@@ -745,7 +898,29 @@ fn parse_glb(bytes: &[u8], expected_sides: u32) -> Option<DieMesh> {
         let mut out = Vec::with_capacity(count);
         for i in 0..count {
             let o = base + i * stride;
-            out.push(V(read_f32_le(bin, o)?, read_f32_le(bin, o + 4)?, read_f32_le(bin, o + 8)?));
+            out.push(V(
+                read_f32_le(bin, o)?,
+                read_f32_le(bin, o + 4)?,
+                read_f32_le(bin, o + 8)?,
+            ));
+        }
+        Some(out)
+    };
+
+    let read_uv = |idx: usize| -> Option<Vec<[f32; 2]>> {
+        let acc = accessors.get(idx)?;
+        if acc.get("componentType")?.as_u64()? != 5126 || acc.get("type")?.as_str()? != "VEC2" {
+            return None;
+        }
+        let count = acc.get("count")?.as_u64()? as usize;
+        let bv = views.get(acc.get("bufferView")?.as_u64()? as usize)?;
+        let stride = bv.get("byteStride").and_then(Value::as_u64).unwrap_or(8) as usize;
+        let base = bv.get("byteOffset").and_then(Value::as_u64).unwrap_or(0) as usize
+            + acc.get("byteOffset").and_then(Value::as_u64).unwrap_or(0) as usize;
+        let mut out = Vec::with_capacity(count);
+        for i in 0..count {
+            let o = base + i * stride;
+            out.push([read_f32_le(bin, o)?, read_f32_le(bin, o + 4)?]);
         }
         Some(out)
     };
@@ -761,7 +936,9 @@ fn parse_glb(bytes: &[u8], expected_sides: u32) -> Option<DieMesh> {
         for i in 0..count {
             let v = match ct {
                 5121 => usize::from(*bin.get(base + i)?),
-                5123 => usize::from(u16::from_le_bytes(bin.get(base + i * 2..base + i * 2 + 2)?.try_into().ok()?)),
+                5123 => usize::from(u16::from_le_bytes(
+                    bin.get(base + i * 2..base + i * 2 + 2)?.try_into().ok()?,
+                )),
                 5125 => read_u32_le(bin, base + i * 4)? as usize,
                 _ => return None,
             };
@@ -786,32 +963,54 @@ fn parse_glb(bytes: &[u8], expected_sides: u32) -> Option<DieMesh> {
         .and_then(|s| s.get(gltf.get("scene").and_then(Value::as_u64).unwrap_or(0) as usize))
         .and_then(|s| s.get("nodes"))
         .and_then(Value::as_array)
-        .map(|arr| arr.iter().filter_map(|v| v.as_u64().map(|n| n as usize)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_u64().map(|n| n as usize))
+                .collect()
+        })
         .unwrap_or_else(|| (0..nodes.len()).filter(|i| !children.contains(i)).collect());
 
     let mut vertices = Vec::new();
-    let mut raw_tris: Vec<([usize; 3], Option<u32>, Option<[u8; 3]>)> = Vec::new();
+    let mut uvs = Vec::new();
+    let mut raw_tris: Vec<([usize; 3], Option<u32>, Option<[u8; 3]>, Option<usize>)> = Vec::new();
     let identity: [f32; 16] = [
         1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
     ];
     let mut stack: Vec<(usize, [f32; 16])> = roots.into_iter().map(|r| (r, identity)).collect();
 
     while let Some((node_idx, parent)) = stack.pop() {
-        let Some(node) = nodes.get(node_idx) else { continue; };
+        let Some(node) = nodes.get(node_idx) else {
+            continue;
+        };
         let world = mul_mat4(&parent, &node_local_mat4(node));
         if let Some(mesh_idx) = node.get("mesh").and_then(Value::as_u64) {
-            if let Some(prims) = meshes.get(mesh_idx as usize).and_then(|m| m.get("primitives")).and_then(Value::as_array) {
+            if let Some(prims) = meshes
+                .get(mesh_idx as usize)
+                .and_then(|m| m.get("primitives"))
+                .and_then(Value::as_array)
+            {
                 for prim in prims {
                     if prim.get("mode").and_then(Value::as_u64).unwrap_or(4) != 4 {
                         continue;
                     }
-                    let Some(pos_idx) = prim.get("attributes").and_then(|a| a.get("POSITION")).and_then(Value::as_u64) else {
+                    let Some(pos_idx) = prim
+                        .get("attributes")
+                        .and_then(|a| a.get("POSITION"))
+                        .and_then(Value::as_u64)
+                    else {
                         continue;
                     };
                     let positions = read_pos(pos_idx as usize)?;
+                    let prim_uvs = prim
+                        .get("attributes")
+                        .and_then(|a| a.get("TEXCOORD_0"))
+                        .and_then(Value::as_u64)
+                        .and_then(|i| read_uv(i as usize))
+                        .filter(|u| u.len() == positions.len());
                     let base_v = vertices.len();
-                    for p in &positions {
+                    for (idx_p, p) in positions.iter().enumerate() {
                         vertices.push(transform_point(&world, *p));
+                        uvs.push(prim_uvs.as_ref().map(|u| u[idx_p]).unwrap_or([0.0, 0.0]));
                     }
                     let indices = match prim.get("indices").and_then(Value::as_u64) {
                         Some(idx) => read_idx(idx as usize)?,
@@ -825,8 +1024,8 @@ fn parse_glb(bytes: &[u8], expected_sides: u32) -> Option<DieMesh> {
                         .and_then(|m| m.get("name"))
                         .and_then(Value::as_str)
                         .and_then(parse_face_material_name);
-                    let rgb = mat
-                        .and_then(|m| m.get("pbrMetallicRoughness"))
+                    let pbr = mat.and_then(|m| m.get("pbrMetallicRoughness"));
+                    let rgb = pbr
                         .and_then(|p| p.get("baseColorFactor"))
                         .and_then(Value::as_array)
                         .filter(|a| a.len() >= 3)
@@ -837,8 +1036,25 @@ fn parse_glb(bytes: &[u8], expected_sides: u32) -> Option<DieMesh> {
                                 linear_to_srgb_byte(a[2].as_f64().unwrap_or(1.0) as f32),
                             ]
                         });
+                    let image_idx = if prim_uvs.is_some() {
+                        pbr.and_then(|p| p.get("baseColorTexture"))
+                            .and_then(|t| t.get("index"))
+                            .and_then(Value::as_u64)
+                            .and_then(|ti| gltf_textures.and_then(|ts| ts.get(ti as usize)))
+                            .and_then(|t| t.get("source"))
+                            .and_then(Value::as_u64)
+                            .map(|si| si as usize)
+                            .filter(|&si| textures.get(si).is_some_and(|t| !t.bytes.is_empty()))
+                    } else {
+                        None
+                    };
                     for tri in indices.chunks_exact(3) {
-                        raw_tris.push(([base_v + tri[0], base_v + tri[1], base_v + tri[2]], face_val, rgb));
+                        raw_tris.push((
+                            [base_v + tri[0], base_v + tri[1], base_v + tri[2]],
+                            face_val,
+                            rgb,
+                            image_idx,
+                        ));
                     }
                 }
             }
@@ -877,9 +1093,10 @@ fn parse_glb(bytes: &[u8], expected_sides: u32) -> Option<DieMesh> {
     for val in 1..=expected_sides {
         let mut n_sum = V::default();
         let mut c_sum = V::default();
+        let mut t_sum = V::default();
         let mut a_sum = 0.0_f32;
         let mut count = 0usize;
-        for &(idx, face_val, _) in &raw_tris {
+        for &(idx, face_val, _, _) in &raw_tris {
             if face_val != Some(val) {
                 continue;
             }
@@ -895,18 +1112,41 @@ fn parse_glb(bytes: &[u8], expected_sides: u32) -> Option<DieMesh> {
             n_sum = n_sum.plus(oriented);
             c_sum = c_sum.plus(mid.times(area));
             a_sum += area;
+
+            // Derive face right axis from UV +u tangent (dP/du) so textured digits land upright.
+            let uv0 = uvs[idx[0]];
+            let uv1 = uvs[idx[1]];
+            let uv2 = uvs[idx[2]];
+            let du1 = uv1[0] - uv0[0];
+            let dv1 = uv1[1] - uv0[1];
+            let du2 = uv2[0] - uv0[0];
+            let dv2 = uv2[1] - uv0[1];
+            let det = du1 * dv2 - du2 * dv1;
+            if det.abs() > 1e-8 {
+                let dp1 = b.minus(a);
+                let dp2 = c.minus(a);
+                let tangent = dp1.times(dv2).minus(dp2.times(dv1)).times(det.recip());
+                if tangent.len() > 1e-8 {
+                    t_sum = t_sum.plus(tangent.unit().times(area));
+                }
+            }
         }
         if count == 0 || a_sum <= 1e-8 {
             return None;
         }
         let normal = n_sum.unit();
         let fc = c_sum.times(a_sum.recip());
-        let reference = if normal.1.abs() < 0.9 {
-            V(0.0, 1.0, 0.0)
+        let t_proj = t_sum.minus(normal.times(t_sum.dot(normal)));
+        let right = if t_proj.len() > 1e-5 {
+            t_proj.unit()
         } else {
-            V(0.0, 0.0, 1.0)
+            let reference = if normal.1.abs() < 0.9 {
+                V(0.0, 1.0, 0.0)
+            } else {
+                V(0.0, 0.0, 1.0)
+            };
+            reference.cross(normal).unit()
         };
-        let right = reference.cross(normal).unit();
         let up = normal.cross(right).unit();
         faces.push(Face {
             value: val,
@@ -919,9 +1159,10 @@ fn parse_glb(bytes: &[u8], expected_sides: u32) -> Option<DieMesh> {
         });
     }
 
-    let triangles = raw_tris
+    let has_any_texture = raw_tris.iter().any(|t| t.3.is_some());
+    let mut triangles: Vec<MeshTriangle> = raw_tris
         .into_iter()
-        .map(|(idx, face, color)| {
+        .map(|(idx, face, color, image)| {
             let (a, b, c) = (vertices[idx[0]], vertices[idx[1]], vertices[idx[2]]);
             let n = b.minus(a).cross(c.minus(a));
             let mid = a.plus(b).plus(c).times(1.0 / 3.0);
@@ -934,14 +1175,31 @@ fn parse_glb(bytes: &[u8], expected_sides: u32) -> Option<DieMesh> {
                 indices,
                 face,
                 color,
+                image,
             }
         })
         .collect();
 
+    // Subdivide coarse textured meshes so 2D affine UV interpolation is visually perspective-correct.
+    if has_any_texture {
+        let levels = if triangles.len() <= 16 {
+            2
+        } else if triangles.len() <= 40 {
+            1
+        } else {
+            0
+        };
+        if levels > 0 {
+            triangles = subdivide_mesh(&mut vertices, &mut uvs, triangles, levels);
+        }
+    }
+
     Some(DieMesh {
         vertices,
+        uvs,
         faces,
         triangles,
+        textures,
     })
 }
 
@@ -1012,6 +1270,93 @@ mod tests {
                     })
                     .unwrap();
                 assert_eq!(front.value, value, "D{sides}");
+            }
+        }
+    }
+
+    #[test]
+    fn bundled_glb_models_decode_textures_and_land_upright_on_every_face() {
+        for (bytes, sides, corners) in [(BUNDLED_D6_GLB, 6, 4), (BUNDLED_D20_GLB, 20, 3)] {
+            let mesh = parse_glb(bytes, sides).expect("bundled GLB must parse");
+            assert!(mesh.valid(sides, corners));
+            assert!(!mesh.textures.is_empty(), "D{sides} must have embedded texture");
+            assert!(
+                !mesh.textures[0].bytes.is_empty(),
+                "D{sides} texture bytes must not be empty"
+            );
+            let decoded = image::load_from_memory(&mesh.textures[0].bytes)
+                .expect("embedded PNG must decode");
+            assert_eq!(decoded.width(), 1024);
+            assert_eq!(decoded.height(), 1024);
+            assert_eq!(mesh.uvs.len(), mesh.vertices.len());
+            assert!(
+                mesh.triangles.iter().all(|t| t.image == Some(0)),
+                "D{sides} all triangles use embedded texture"
+            );
+
+            for value in 1..=sides {
+                let t = orientation(&mesh, value, 1.0);
+                let best = mesh
+                    .faces
+                    .iter()
+                    .max_by(|a, b| {
+                        let za = t(a.center.unwrap().plus(a.normal.unwrap().times(0.1)))
+                            .minus(t(a.center.unwrap()))
+                            .2;
+                        let zb = t(b.center.unwrap().plus(b.normal.unwrap().times(0.1)))
+                            .minus(t(b.center.unwrap()))
+                            .2;
+                        za.total_cmp(&zb)
+                    })
+                    .unwrap();
+                assert_eq!(best.value, value, "Bundled GLB D{sides} landing on {value}");
+
+                // Verify the face's UV-up direction lands upright toward screen +Y.
+                let fc = best.center.unwrap();
+                let fu = best.up.unwrap();
+                let up_after = t(fc.plus(fu.times(0.1))).minus(t(fc)).unit();
+                assert!(
+                    up_after.1 > 0.9,
+                    "Bundled GLB D{sides} face {value} should land upright (up_y={})",
+                    up_after.1
+                );
+            }
+
+            // Ensure front-facing triangles pass screen-area culling cleanly at every spin phase.
+            let center = Pos2::new(400.0, 300.0);
+            let radius = 160.0;
+            let project = |p: V| {
+                let lens = radius * 3.8 / (3.8 - p.2).max(0.5);
+                center + Vec2::new(p.0, -p.1) * lens
+            };
+            for phase in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+                let xform = orientation(&mesh, 1, phase);
+                let verts: Vec<_> = mesh.vertices.iter().copied().map(&xform).collect();
+                let mut visible_count = 0usize;
+                for tri in &mesh.triangles {
+                    let [i0, i1, i2] = tri.indices;
+                    let (a, b, c) = (verts[i0], verts[i1], verts[i2]);
+                    let mid = a.plus(b).plus(c).times(1.0 / 3.0);
+                    let normal = b.minus(a).cross(c.minus(a)).unit();
+                    if V(0.0, 0.0, 3.8).minus(mid).dot(normal) <= 1e-4 {
+                        continue;
+                    }
+                    let (pa, pb, pc) = (project(a), project(b), project(c));
+                    if screen_double_area(pa, pb, pc) > -0.25 {
+                        continue;
+                    }
+                    for p in [pa, pb, pc] {
+                        assert!(
+                            p.distance(center) < radius * 2.0,
+                            "D{sides} projected vertex out of bounds at t={phase}"
+                        );
+                    }
+                    visible_count += 1;
+                }
+                assert!(
+                    visible_count >= 16,
+                    "D{sides} expected visible textured triangles at t={phase}, got {visible_count}"
+                );
             }
         }
     }

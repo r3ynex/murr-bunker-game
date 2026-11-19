@@ -103,3 +103,26 @@ test("parseGlb extracts vertices, triangles, colors, and outward face anchors", 
   const f1Tri = mesh.triangles.find(t => t.face === 1);
   assert.ok(f1Tri?.color && f1Tri.color[0] > 200);
 });
+
+test("repository d6.glb and d20.glb parse with all numbered faces and UVs", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const path = await import("node:path");
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+
+  for (const [file, sides, tris] of [["d6.glb", 6, 12], ["d20.glb", 20, 20]]) {
+    const parsed = parseGlb(readFileSync(path.join(root, file)), sides);
+    assert.equal(parsed.faces.length, sides, `${file} face count`);
+    assert.equal(parsed.triangles.length, tris, `${file} triangle count`);
+    assert.equal(parsed.uvs?.length, parsed.vertices.length, `${file} UV count`);
+    for (let v = 1; v <= sides; v++) {
+      const face = parsed.faces.find(f => f.value === v);
+      assert.ok(face, `${file} face ${v} exists`);
+      const outward = face.normal[0] * face.center[0] + face.normal[1] * face.center[1] + face.normal[2] * face.center[2];
+      assert.ok(outward > 0.2, `${file} face ${v} normal points outward`);
+      const ortho = face.right[0] * face.normal[0] + face.right[1] * face.normal[1] + face.right[2] * face.normal[2];
+      assert.ok(Math.abs(ortho) < 1e-3, `${file} face ${v} right orthogonal to normal`);
+    }
+  }
+});
+

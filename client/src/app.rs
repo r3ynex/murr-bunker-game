@@ -767,27 +767,45 @@ impl BunkerApp {
                                         ui.painter().rect_filled(bar, 2u8, status_color);
                                         self.avatar_widget(ui, player.avatar(), is_you, side);
                                         ui.vertical(|ui| {
-                                            ui.horizontal(|ui| {
-                                                if player_is_host {
-                                                    if let Some(icon) = self.artwork.icon(Icon::Host, 18.0) {
-                                                        ui.add(icon).on_hover_text("Ведущий");
-                                                    } else {
-                                                        ui.label(
-                                                            RichText::new(&self.theme.icons.host)
-                                                                .color(self.theme.palette.accent_title.color()),
-                                                        )
-                                                        .on_hover_text("Ведущий");
+                                            let name_font = FontWeight::Bold.font(self.theme.fonts.lobby_name);
+                                            let name_row_height = ui.fonts_mut(|f| f.row_height(&name_font)).max(22.0);
+                                            ui.allocate_ui_with_layout(
+                                                egui::vec2(ui.available_width(), name_row_height),
+                                                egui::Layout::left_to_right(egui::Align::Center),
+                                                |ui| {
+                                                    ui.spacing_mut().item_spacing.x = 6.0;
+                                                    if player_is_host {
+                                                        let icon_size = (self.theme.fonts.lobby_name * 0.88).clamp(16.0, 22.0);
+                                                        if let Some(icon) = self.artwork.icon(Icon::Host, icon_size) {
+                                                            let (rect, resp) = ui.allocate_exact_size(
+                                                                egui::vec2(icon_size, name_row_height),
+                                                                egui::Sense::hover(),
+                                                            );
+                                                            let icon_rect = egui::Rect::from_center_size(
+                                                                rect.center() + egui::vec2(0.0, 1.0),
+                                                                egui::Vec2::splat(icon_size),
+                                                            );
+                                                            ui.put(icon_rect, icon);
+                                                            resp.on_hover_text("Ведущий");
+                                                        } else {
+                                                            ui.label(
+                                                                RichText::new(&self.theme.icons.host)
+                                                                    .size(self.theme.fonts.lobby_name * 0.92)
+                                                                    .color(self.theme.palette.accent_title.color()),
+                                                            )
+                                                            .on_hover_text("Ведущий");
+                                                        }
                                                     }
-                                                }
-                                                ui.add(
-                                                    egui::Label::new(FontWeight::Bold.text(
-                                                        self.theme.fonts.lobby_name,
-                                                        &player.name,
-                                                    ))
-                                                    .truncate(),
-                                                )
-                                                .on_hover_text(&player.name);
-                                            });
+                                                    ui.add(
+                                                        egui::Label::new(FontWeight::Bold.text(
+                                                            self.theme.fonts.lobby_name,
+                                                            &player.name,
+                                                        ))
+                                                        .truncate(),
+                                                    )
+                                                    .on_hover_text(&player.name);
+                                                },
+                                            );
                                             let subtitle = if player_is_host {
                                                 if is_you { "Ведущий · Вы" } else { "Ведущий" }
                                             } else if ready {

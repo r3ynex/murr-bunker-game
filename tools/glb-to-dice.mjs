@@ -98,6 +98,24 @@ function readAccessorVec3(gltf, bin, accessorIndex) {
   return out;
 }
 
+function readAccessorVec2(gltf, bin, accessorIndex) {
+  const accessor = gltf.accessors?.[accessorIndex];
+  if (!accessor || accessor.type !== "VEC2" || accessor.componentType !== 5126) {
+    return null;
+  }
+  const view = gltf.bufferViews?.[accessor.bufferView];
+  if (!view) return null;
+  const stride = view.byteStride || 8;
+  const base = (view.byteOffset || 0) + (accessor.byteOffset || 0);
+  const dv = new DataView(bin.buffer, bin.byteOffset, bin.byteLength);
+  const out = [];
+  for (let i = 0; i < accessor.count; i++) {
+    const off = base + i * stride;
+    out.push([dv.getFloat32(off, true), dv.getFloat32(off + 4, true)]);
+  }
+  return out;
+}
+
 function readAccessorIndices(gltf, bin, accessorIndex) {
   const accessor = gltf.accessors?.[accessorIndex];
   if (!accessor) throw new Error("Missing indices accessor");
@@ -148,7 +166,9 @@ export function parseGlb(bytes, expectedSides) {
   const roots = gltf.scenes?.[sceneIdx]?.nodes ?? nodes.map((_, i) => i).filter(i => !childSet.has(i));
 
   const vertices = [];
+  const uvs = [];
   const triangles = [];
+  let hasAnyUvs = false;
 
   function visit(nodeIdx, parentMat) {
     const node = nodes[nodeIdx];
@@ -160,8 +180,16 @@ export function parseGlb(bytes, expectedSides) {
         if (prim.mode !== undefined && prim.mode !== 4) continue; // TRIANGLES only
         if (prim.attributes?.POSITION === undefined) continue;
         const positions = readAccessorVec3(gltf, bin, prim.attributes.POSITION);
+        const primUvs = prim.attributes.TEXCOORD_0 !== undefined
+          ? readAccessorVec2(gltf, bin, prim.attributes.TEXCOORD_0)
+          : null;
+        const validUvs = primUvs && primUvs.length === positions.length ? primUvs : null;
+        if (validUvs) hasAnyUvs = true;
         const baseVertex = vertices.length;
-        for (const p of positions) vertices.push(transformPoint(world, p));
+        for (let k = 0; k < positions.length; k++) {
+          vertices.push(transformPoint(world, positions[k]));
+          uvs.push(validUvs ? validUvs[k] : [0, 0]);
+        }
         const indices = prim.indices !== undefined
           ? readAccessorIndices(gltf, bin, prim.indices)
           : positions.map((_, i) => i);
@@ -227,8 +255,8 @@ export function parseGlb(bytes, expectedSides) {
     }
     let normalSum = [0, 0, 0];
     let centerSum = [0, 0, 0];
+    let tangentSum = [0, 0, 0];
     let areaSum = 0;
-    const faceVerts = [];
     for (const tri of tris) {
       const a = vertices[tri.i[0]], b = vertices[tri.i[1]], c = vertices[tri.i[2]];
       const n = cross(sub(b, a), sub(c, a));
@@ -239,14 +267,28 @@ export function parseGlb(bytes, expectedSides) {
       normalSum = add(normalSum, oriented);
       centerSum = add(centerSum, mul(mid, area));
       areaSum += area;
-      faceVerts.push(a, b, c);
+
+      const uv0 = uvs[tri.i[0]], uv1 = uvs[tri.i[1]], uv2 = uvs[tri.i[2]];
+      const du1 = uv1[0] - uv0[0], dv1 = uv1[1] - uv0[1];
+      const du2 = uv2[0] - uv0[0], dv2 = uv2[1] - uv0[1];
+      const det = du1 * dv2 - du2 * dv1;
+      if (Math.abs(det) > 1e-8) {
+        const dp1 = sub(b, a), dp2 = sub(c, a);
+        const tangent = mul(sub(mul(dp1, dv2), mul(dp2, dv1)), 1 / det);
+        if (len(tangent) > 1e-8) tangentSum = add(tangentSum, mul(unit(tangent), area));
+      }
     }
     const normal = unit(normalSum);
     const faceCenter = areaSum > 1e-8 ? mul(centerSum, 1 / areaSum) : [0, 0, 0];
-    // Pick a deterministic up vector on the face plane.
-    let ref = Math.abs(normal[1]) < 0.9 ? [0, 1, 0] : [0, 0, 1];
-    let right = unit(cross(ref, normal));
-    let up = unit(cross(normal, right));
+    const tProj = sub(tangentSum, mul(normal, dot(tangentSum, normal)));
+    let right;
+    if (len(tProj) > 1e-5) {
+      right = unit(tProj);
+    } else {
+      const ref = Math.abs(normal[1]) < 0.9 ? [0, 1, 0] : [0, 0, 1];
+      right = unit(cross(ref, normal));
+    }
+    const up = unit(cross(normal, right));
     faces.push({
       value,
       center: faceCenter.map(n => Number(n.toFixed(5))),
@@ -270,7 +312,9 @@ export function parseGlb(bytes, expectedSides) {
     return entry;
   });
 
-  return { vertices, faces, triangles: outTriangles };
+  return hasAnyUvs
+    ? { vertices, uvs: uvs.map(u => u.map(n => Number(n.toFixed(5)))), faces, triangles: outTriangles }
+    : { vertices, faces, triangles: outTriangles };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
