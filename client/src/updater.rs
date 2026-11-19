@@ -54,6 +54,7 @@ pub struct Updater {
 
 impl Updater {
     pub fn new() -> Self {
+        cleanup_old_executable();
         let mut updater = Self {
             state: State::Idle,
             startup_notice: match std::env::args_os().nth(1).as_deref() {
@@ -304,63 +305,101 @@ fn verify_exe(reader: impl Read, size: u64, digest: &str) -> Result<Vec<u8>, Str
 
 #[cfg(windows)]
 fn install(update: &Update) -> std::io::Result<()> {
-    use std::fs::{self, File};
-    use std::io::{self, Write};
-
     let target = std::env::current_exe()?;
     let directory = target
         .parent()
-        .ok_or_else(|| io::Error::other("Папка игры не найдена"))?;
-    let current_hash = format!("{:x}", Sha256::digest(fs::read(&target)?));
-    let stage = tempfile::Builder::new()
-        .prefix(".murr-update-")
-        .tempdir_in(directory)?;
-    let staged_exe = stage.path().join("download.exe");
-    let mut file = File::create(&staged_exe)?;
-    file.write_all(&update.bytes)?;
-    file.sync_all()?;
-    drop(file);
-    installer_command()?
-        .env("MURR_INSTALL_TARGET", target)
-        .env("MURR_INSTALL_DOWNLOAD", staged_exe)
-        .env("MURR_INSTALL_PID", std::process::id().to_string())
-        .env("MURR_INSTALL_OLD_HASH", current_hash)
-        .env(
-            "MURR_INSTALL_NEW_HASH",
-            format!("{:x}", Sha256::digest(&update.bytes)),
-        )
-        .spawn()?;
-    let _ = stage.keep();
+        .ok_or_else(|| std::io::Error::other("Папка игры не найдена"))?;
+    let expected_hash = format!("{:x}", Sha256::digest(&update.bytes));
+    let backup = replace_executable_at(&target, &update.bytes, &expected_hash)?;
+    if let Err(err) = std::process::Command::new(&target)
+        .arg("--murr-update-installed")
+        .current_dir(directory)
+        .spawn()
+    {
+        // Roll back to the previous executable if launching the new one fails.
+        let _ = std::fs::remove_file(&target);
+        let _ = std::fs::rename(&backup, &target);
+        return Err(err);
+    }
     Ok(())
-}
-
-#[cfg(windows)]
-fn installer_command() -> std::io::Result<std::process::Command> {
-    use std::os::windows::process::CommandExt;
-    use std::path::PathBuf;
-    use std::process::Command;
-
-    let powershell = PathBuf::from(
-        std::env::var_os("SystemRoot")
-            .ok_or_else(|| std::io::Error::other("Папка Windows не найдена"))?,
-    )
-    .join("System32/WindowsPowerShell/v1.0/powershell.exe");
-    let mut command = Command::new(powershell);
-    command
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            include_str!("install_update.ps1"),
-        ])
-        .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    Ok(command)
 }
 
 #[cfg(not(windows))]
 fn install(_: &Update) -> std::io::Result<()> {
     Err(std::io::Error::other("Автообновление доступно в Windows"))
+}
+
+fn old_exe_path(target: &std::path::Path) -> std::path::PathBuf {
+    let mut name = target
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_else(|| std::ffi::OsString::from(ASSET_NAME));
+    name.push(".old");
+    target.with_file_name(name)
+}
+
+fn cleanup_old_executable() {
+    let Ok(target) = std::env::current_exe() else {
+        return;
+    };
+    let backup = old_exe_path(&target);
+    if !backup.exists() {
+        return;
+    }
+    if std::fs::remove_file(&backup).is_ok() {
+        return;
+    }
+    // Previous process may still be releasing its file handle briefly after relaunch.
+    std::thread::spawn(move || {
+        for _ in 0..20 {
+            std::thread::sleep(Duration::from_millis(150));
+            if !backup.exists() || std::fs::remove_file(&backup).is_ok() {
+                break;
+            }
+        }
+    });
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn replace_executable_at(
+    target: &std::path::Path,
+    bytes: &[u8],
+    expected_hash: &str,
+) -> std::io::Result<std::path::PathBuf> {
+    use std::fs::{self, File};
+    use std::io::{self, Write};
+
+    if !bytes.starts_with(b"MZ") {
+        return Err(io::Error::other("Некорректный заголовок EXE"));
+    }
+    let actual_hash = format!("{:x}", Sha256::digest(bytes));
+    if !actual_hash.eq_ignore_ascii_case(expected_hash) {
+        return Err(io::Error::other("Контрольная сумма файла обновления не совпала"));
+    }
+    let directory = target
+        .parent()
+        .ok_or_else(|| io::Error::other("Папка игры не найдена"))?;
+    let backup = old_exe_path(target);
+    if backup.exists() {
+        let _ = fs::remove_file(&backup);
+    }
+    let staged = directory.join(format!(".murr-update-{}.tmp", std::process::id()));
+    {
+        let mut file = File::create(&staged)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    // Windows permits renaming a running executable on the same volume without external scripts.
+    if let Err(err) = fs::rename(target, &backup) {
+        let _ = fs::remove_file(&staged);
+        return Err(err);
+    }
+    if let Err(err) = fs::rename(&staged, target) {
+        let _ = fs::remove_file(&staged);
+        let _ = fs::rename(&backup, target);
+        return Err(err);
+    }
+    Ok(backup)
 }
 
 #[cfg(test)]
@@ -400,46 +439,36 @@ mod tests {
         assert!(verify_exe(b"MZmodified executable".as_slice(), size, &digest).is_err());
     }
 
-    #[cfg(windows)]
     #[test]
-    fn windows_installer_replaces_or_restores_the_exe_and_leaves_settings() {
+    fn pure_rust_updater_replaces_executable_and_preserves_settings() {
         use std::fs;
-        use std::path::PathBuf;
 
-        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
-        let original = fs::read(system.join("where.exe")).unwrap();
-        let replacement = fs::read(system.join("whoami.exe")).unwrap();
-        let old_hash = format!("{:x}", Sha256::digest(&original));
-        for (bytes, expected) in [
-            (replacement.as_slice(), replacement.as_slice()),
-            (b"MZ invalid executable".as_slice(), original.as_slice()),
-        ] {
-            let directory = tempfile::tempdir().unwrap();
-            let target = directory.path().join("Мурр Бункер.exe");
-            let settings = directory.path().join("theme.json");
-            let stage = directory.path().join("stage");
-            let download = stage.join("download.exe");
-            fs::create_dir(&stage).unwrap();
-            fs::write(&target, &original).unwrap();
-            fs::write(&settings, "{}").unwrap();
-            fs::write(&download, bytes).unwrap();
-            let status = installer_command()
-                .unwrap()
-                .env("PSModulePath", directory.path())
-                .env("MURR_INSTALL_TARGET", &target)
-                .env("MURR_INSTALL_DOWNLOAD", &download)
-                .env("MURR_INSTALL_PID", i32::MAX.to_string())
-                .env("MURR_INSTALL_OLD_HASH", &old_hash)
-                .env(
-                    "MURR_INSTALL_NEW_HASH",
-                    format!("{:x}", Sha256::digest(bytes)),
-                )
-                .status()
-                .unwrap();
-            assert!(status.success());
-            assert_eq!(fs::read(&target).unwrap(), expected);
-            assert_eq!(fs::read_to_string(settings).unwrap(), "{}");
-            assert!(!stage.exists());
-        }
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("murr-updater-{unique}"));
+        fs::create_dir(&directory).unwrap();
+        let target = directory.join("Мурр Бункер.exe");
+        let settings = directory.join("theme.json");
+        let original = b"MZold-binary";
+        let replacement = b"MZnew-binary";
+        fs::write(&target, original).unwrap();
+        fs::write(&settings, "{}").unwrap();
+
+        let bad_hash = "0".repeat(64);
+        assert!(replace_executable_at(&target, replacement, &bad_hash).is_err());
+        assert_eq!(fs::read(&target).unwrap(), original);
+
+        let good_hash = format!("{:x}", Sha256::digest(replacement));
+        let backup = replace_executable_at(&target, replacement, &good_hash).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), replacement);
+        assert_eq!(fs::read(&backup).unwrap(), original);
+        assert_eq!(fs::read_to_string(&settings).unwrap(), "{}");
+
+        fs::remove_file(&backup).unwrap();
+        fs::remove_file(&target).unwrap();
+        fs::remove_file(&settings).unwrap();
+        fs::remove_dir(&directory).unwrap();
     }
 }

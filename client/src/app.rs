@@ -220,7 +220,7 @@ impl BunkerApp {
         }
         self.artwork.reload_icons(ctx);
         self.dice.reload_meshes();
-        self.avatars = Avatars::discover();
+        self.avatars.rescan(true);
         self.theme = theme;
         self.layout = layout;
         let warnings = appearance_warnings([theme_warning, layout_warning, font_warning]);
@@ -542,7 +542,7 @@ impl BunkerApp {
         self.notify("Вы вышли в главное меню");
     }
     fn open_avatar_picker(&mut self) {
-        self.avatars = Avatars::discover();
+        self.avatars.rescan(false);
         self.show_avatar_picker = true;
     }
     fn avatar_widget(&self, ui: &mut egui::Ui, avatar: AvatarId, selected: bool, size: f32) -> egui::Response {
